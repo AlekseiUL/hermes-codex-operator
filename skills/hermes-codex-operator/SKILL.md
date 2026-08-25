@@ -1,7 +1,7 @@
 ---
 name: hermes-codex-operator
 description: Act as a technical partner for planning, dispatching, following, verifying, and explaining local Codex engineering work through the hermes-codex CLI. Use for implementation tasks where Codex should do the coding; do not use as a general orchestrator or for unrelated shell work.
-license: Apache-2.0
+license: MIT
 metadata:
   hermes:
     category: development

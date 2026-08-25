@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/AlekseiUL/hermes-codex-operator/actions/workflows/ci.yml"><img src="https://github.com/AlekseiUL/hermes-codex-operator/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0 license"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
 </p>
 
 <p align="center"><strong>Talk to Hermes. Ship with Codex.</strong></p>
@@ -308,7 +308,7 @@ findings are recorded in [REVIEWS](docs/REVIEWS.md).
 
 ## License and trademarks
 
-Apache-2.0. This is an independent community project. It is not affiliated
+MIT. This is an independent community project. It is not affiliated
 with or endorsed by OpenAI or Nous Research. Hermes Agent and Codex are names
 of their respective projects and products.
 
@@ -431,6 +431,6 @@ Operator связывает хеш промпта, рабочую папку, т
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent)
 - [OpenAI Codex](https://github.com/openai/codex)
 
-Проект распространяется по лицензии Apache-2.0. Это независимый проект
+Проект распространяется по лицензии MIT. Это независимый проект
 сообщества, не связанный официально с OpenAI или Nous Research и не одобренный
 ими.

@@ -28,6 +28,13 @@ All notable changes to this project will be documented here. The format follows
   invalidate byte-count checks.
 - Make the synthetic App Server fixture use native absolute paths on every
   supported platform.
+- Make the final-snapshot cancellation test release its worker on every exit
+  path and use bounded synchronization on slower CI runners.
+- Bound every CI job to ten minutes so a future deadlock fails visibly.
+
+### Changed
+
+- Switched the project license from Apache-2.0 to MIT before the first release.
 
 [Unreleased]: https://github.com/AlekseiUL/hermes-codex-operator/compare/v0.0.1...HEAD
 [0.0.1]: https://github.com/AlekseiUL/hermes-codex-operator/releases/tag/v0.0.1

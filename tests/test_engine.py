@@ -291,13 +291,22 @@ class OperatorEngineTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("hermes_codex_operator.engine.snapshot_workspace", blocking_snapshot):
             task = asyncio.create_task(self.operator(FakeBackend()).submit(contract))
-            reached = await asyncio.to_thread(entered.wait, 1)
-            self.assertTrue(reached, "final snapshot was not reached")
-            task.cancel()
-            await asyncio.sleep(0)
-            release.set()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
+            try:
+                reached = await asyncio.to_thread(entered.wait, 10)
+                self.assertTrue(reached, "final snapshot was not reached")
+                task.cancel()
+                await asyncio.sleep(0)
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=5)
+            finally:
+                release.set()
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await asyncio.wait_for(task, timeout=5)
+                    except asyncio.CancelledError:
+                        pass
 
         operation = self.journal.get_operation(contract.operation_id)
         self.assertEqual(operation.state, OperationState.CANCELLED)
