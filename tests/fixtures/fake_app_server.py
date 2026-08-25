@@ -160,7 +160,7 @@ def main() -> None:
     )
     thread_request = expect(expected_thread_method)
     thread_params = thread_request["params"]
-    assert thread_params["cwd"].startswith("/")
+    assert os.path.isabs(thread_params["cwd"])
     expected_sandbox = "read-only" if SCENARIO == "resume_read_only" else "workspace-write"
     expected_approval = "untrusted" if SCENARIO == "resume_read_only" else "never"
     assert thread_params["sandbox"] == expected_sandbox
