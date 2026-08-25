@@ -146,7 +146,7 @@ def main() -> None:
     response(
         initialize,
         {
-            "codexHome": "/synthetic/codex-home",
+            "codexHome": os.path.abspath(".synthetic-codex-home"),
             "platformFamily": "unix",
             "platformOs": "synthetic",
             "userAgent": "synthetic-app-server",

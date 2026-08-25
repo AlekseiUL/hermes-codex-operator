@@ -22,5 +22,12 @@ All notable changes to this project will be documented here. The format follows
 - Atomic, deterministic sdist metadata normalization before release scanning.
 - Public documentation, compatibility policy, roadmap, and release profile.
 
+### Fixed
+
+- Open tree-scan files in binary mode so Windows newline translation cannot
+  invalidate byte-count checks.
+- Make the synthetic App Server fixture return a native absolute Codex home on
+  every supported platform.
+
 [Unreleased]: https://github.com/AlekseiUL/hermes-codex-operator/compare/v0.0.1...HEAD
 [0.0.1]: https://github.com/AlekseiUL/hermes-codex-operator/releases/tag/v0.0.1

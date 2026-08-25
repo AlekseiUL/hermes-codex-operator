@@ -347,6 +347,7 @@ def _path_findings(path: str, deny_terms: Sequence[str]) -> list[Finding]:
 
 def _read_path_no_follow(path: Path, expected_size: int) -> bytes:
     flags = os.O_RDONLY
+    flags |= getattr(os, "O_BINARY", 0)
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
