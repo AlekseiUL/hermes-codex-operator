@@ -1,0 +1,80 @@
+# Compatibility
+
+Hermes Codex Operator integrates with a versioned local protocol. Compatibility
+is declared from evidence, not assumed from a product name.
+
+## Target baseline and current evidence
+
+| Component | Target | Evidence available now | Qualification status |
+|---|---|---|---|
+| Python | 3.11–3.14 | Standard-library runtime; local suite on 3.14; four-version CI matrix defined | CI not yet run publicly |
+| Codex CLI / App Server | 0.149.0 | Generated schemas, scripted protocol/failure suite, and disposable live turn | Qualified on the macOS host listed below |
+| Hermes Agent | 0.20.0 | Isolated discovery and full skill load | Live model/tool run pending |
+| Operating systems | macOS, Linux, Windows | Local macOS tests; three-OS CI matrix defined | Linux/Windows unqualified until CI runs |
+
+The package has no third-party runtime dependencies. Building from source uses
+Setuptools through the standard PEP 517 interface.
+
+## Codex protocol surface used
+
+The core uses a documented v2 stdio protocol surface through the currently
+experimental `codex app-server` command:
+
+- `initialize` and `initialized`;
+- `thread/start` and `thread/resume`;
+- `turn/start` and matching `turn/completed` notifications;
+- `thread/read` with full turns for authoritative exact-turn readback.
+
+The client does not opt into experimental API capabilities or methods. Unknown
+server requests and permission broadening fail closed. Because the executable
+surface itself is experimental, support is always tied to an exact qualified
+Codex CLI version rather than assumed across releases.
+
+The official App Server documentation states that stdio uses newline-delimited
+JSON, requires the initialization handshake, and models conversation as
+threads containing turns and items. See
+[Codex App Server](https://developers.openai.com/codex/app-server).
+
+## Model settings
+
+`model` and `reasoning_effort` are optional WorkContract fields. The portable
+repository does not impose a personal default model.
+
+Protocol v1 accepts the reasoning values proven by the declared App Server
+baseline: `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`. A newer Codex
+release may expose more values, but they must not be accepted until its
+generated schema and a live turn confirm the wire behavior.
+
+## Version qualification procedure
+
+For every newly supported Codex CLI version:
+
+1. record `codex --version`;
+2. generate that binary's App Server JSON schemas;
+3. compare the methods and fields used by the adapter;
+4. run the complete scripted protocol/failure suite;
+5. run the disposable live smoke from `scripts/live_smoke.py`;
+6. repeat the same operation ID and prove `dispatched=false`;
+7. record the result in the table below.
+
+The live command is explicit because it uses the caller's authenticated Codex
+installation and may leave a synthetic thread in local history:
+
+```bash
+python3 scripts/live_smoke.py --confirm-live-codex
+```
+
+Do not silently widen enums or ignore unexpected response fields merely to make
+a newer version pass.
+
+## Live qualification log
+
+| Date | OS | Codex | Hermes | Result | Notes |
+|---|---|---|---|---|---|
+| 2026-08-25 | macOS 26.5 arm64 | 0.124.0 | — | BLOCKED before dispatch | Host config selected unsupported reasoning value `ultra`; App Server accepts only through `xhigh`; no model turn was created |
+| 2026-08-25 | macOS 26.5 arm64 | 0.149.0 | — | PASS: live operator lifecycle | One synthetic turn reached `VERIFIED`; duplicate submit and collect both returned `dispatched=false`; exact changed path and receipt digests were checked |
+| 2026-08-25 | macOS 26.5 arm64 | — | 0.20.0 | PASS: discovery/load | Isolated Hermes home discovered and loaded the complete external skill; no model call was made |
+
+A full Hermes-model-to-tool-to-Codex conversation remains an unqualified
+integration target. The rows above qualify only the exact combinations and
+surfaces they name.

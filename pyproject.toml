@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-codex-operator"
+version = "0.0.1"
+description = "Local-first Hermes operator for tracked and verified Codex work"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Aleksei Ulianov" }]
+dependencies = []
+keywords = [
+  "hermes-agent",
+  "openai-codex",
+  "codex-cli",
+  "codex-app-server",
+  "ai-agents",
+  "developer-tools",
+]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Homepage = "https://github.com/AlekseiUL/hermes-codex-operator"
+Repository = "https://github.com/AlekseiUL/hermes-codex-operator"
+Issues = "https://github.com/AlekseiUL/hermes-codex-operator/issues"
+Documentation = "https://github.com/AlekseiUL/hermes-codex-operator#readme"
+
+[project.scripts]
+hermes-codex = "hermes_codex_operator.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.coverage.run]
+branch = true
+source = ["hermes_codex_operator"]

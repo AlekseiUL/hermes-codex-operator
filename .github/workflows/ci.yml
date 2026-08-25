@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run unit and protocol tests
+        env:
+          PYTHONPATH: src
+          PYTHONWARNINGS: error::ResourceWarning
+        run: python -m unittest discover -s tests -v
+      - name: Scan source tree
+        run: python scripts/privacy_gate.py . --mode tree --mode staged --mode history
+      - name: Check module entry point
+        env:
+          PYTHONPATH: src
+        run: python -m hermes_codex_operator --help
+
+  package:
+    name: Package smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14"
+      - name: Install pinned build frontend
+        run: python -m pip install build==1.5.0 setuptools==84.0.0
+      - name: Record source and toolchain provenance
+        run: |
+          git write-tree
+          python --version
+          python -c "import build,setuptools,zlib; print('build',build.__version__,'setuptools',setuptools.__version__,'zlib',zlib.ZLIB_VERSION)"
+      - name: Prepare artifact directories
+        run: mkdir -p dist "${RUNNER_TEMP}/hermes-codex-raw"
+      - name: Build source and wheel distributions
+        run: python -m build --sdist --wheel --outdir "${RUNNER_TEMP}/hermes-codex-raw"
+      - name: Record raw sdist provenance
+        run: sha256sum "${RUNNER_TEMP}/hermes-codex-raw/hermes_codex_operator-0.0.1.tar.gz"
+      - name: Normalize source-distribution metadata
+        run: |
+          python scripts/normalize_sdist.py \
+            "${RUNNER_TEMP}/hermes-codex-raw/hermes_codex_operator-0.0.1.tar.gz" \
+            --expected-root hermes_codex_operator-0.0.1 \
+            --output dist/hermes_codex_operator-0.0.1.tar.gz
+          cp "${RUNNER_TEMP}/hermes-codex-raw/hermes_codex_operator-0.0.1-py3-none-any.whl" dist/
+      - name: Inspect distribution contents
+        run: |
+          python -c "import glob,tarfile; p=glob.glob('dist/*.tar.gz'); assert len(p)==1; n=tarfile.open(p[0]).getnames(); assert any(x.endswith('/skills/hermes-codex-operator/SKILL.md') for x in n)"
+          python -c "import glob,zipfile; p=glob.glob('dist/*.whl'); assert len(p)==1; n=zipfile.ZipFile(p[0]).namelist(); assert 'hermes_codex_operator/__init__.py' in n; assert not any('codex_steward' in x for x in n)"
+      - name: Scan exact distributions
+        run: python scripts/privacy_gate.py . --mode release --archive dist/hermes_codex_operator-0.0.1-py3-none-any.whl --archive dist/hermes_codex_operator-0.0.1.tar.gz
+      - name: Record artifact digests
+        run: sha256sum dist/*
+      - name: Install normalized source distribution
+        run: python -m pip install --no-deps dist/hermes_codex_operator-0.0.1.tar.gz
+      - name: Check installed source distribution
+        run: |
+          python -c "from hermes_codex_operator import Operator, OperatorOutcome; print(Operator.__name__, OperatorOutcome.__name__)"
+          hermes-codex --help
+      - name: Install wheel
+        run: python -m pip install --force-reinstall --no-deps dist/hermes_codex_operator-0.0.1-py3-none-any.whl
+      - name: Check installed wheel
+        run: |
+          python -c "from hermes_codex_operator import Operator, OperatorOutcome; print(Operator.__name__, OperatorOutcome.__name__)"
+          hermes-codex --help
+      - name: Scan source tree, staged state, and complete reachable history
+        run: python scripts/privacy_gate.py . --mode tree --mode staged --mode history

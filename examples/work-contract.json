@@ -1,0 +1,22 @@
+{
+  "schema_version": "1",
+  "task_id": "acme-widget-health",
+  "operation_id": "00000000-0000-4000-8000-000000000001",
+  "workspace": "/workspace/acme-widget",
+  "prompt": "Add a health endpoint, cover it with tests, and report the changed files.",
+  "allowed_change_globs": [
+    "src/**",
+    "tests/**"
+  ],
+  "verification": [
+    [
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests"
+    ]
+  ],
+  "timeout_seconds": 900
+}

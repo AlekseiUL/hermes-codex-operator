@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/hermes-codex-operator/receipt-v1.schema.json",
+  "title": "Hermes Codex Operator Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "operation_id",
+    "status",
+    "prompt_sha256",
+    "workspace_sha256",
+    "thread_sha256",
+    "turn_sha256",
+    "result_sha256",
+    "changed_paths",
+    "verification",
+    "started_at",
+    "completed_at",
+    "failure_code"
+  ],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "task_id": {"type": "string"},
+    "operation_id": {"type": "string"},
+    "status": {
+      "enum": [
+        "VERIFIED",
+        "FAILED",
+        "CANCELLED",
+        "TIMED_OUT",
+        "UNKNOWN",
+        "VERIFICATION_FAILED",
+        "SCOPE_VIOLATION"
+      ]
+    },
+    "prompt_sha256": {"$ref": "#/$defs/sha256"},
+    "workspace_sha256": {"$ref": "#/$defs/sha256"},
+    "thread_sha256": {
+      "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+    },
+    "turn_sha256": {
+      "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+    },
+    "result_sha256": {
+      "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+    },
+    "changed_paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {
+            "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+          }
+        }
+      }
+    },
+    "verification": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_sha256",
+          "exit_code",
+          "duration_ms",
+          "output_sha256"
+        ],
+        "properties": {
+          "command_sha256": {"$ref": "#/$defs/sha256"},
+          "exit_code": {"type": ["integer", "null"]},
+          "duration_ms": {"type": "integer", "minimum": 0},
+          "output_sha256": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "failure_code": {"type": ["string", "null"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "VERIFIED"}}},
+      "then": {
+        "properties": {
+          "verification": {
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "properties": {"exit_code": {"const": 0}}
+            }
+          },
+          "result_sha256": {"$ref": "#/$defs/sha256"},
+          "failure_code": {"type": "null"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

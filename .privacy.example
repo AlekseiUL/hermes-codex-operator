@@ -1,0 +1,9 @@
+# Template only. Never put real private markers in this repository.
+#
+# Copy this file to a location outside the repository, set its mode to 0600,
+# and replace the commented placeholders with one private marker per line.
+# Blank lines and lines beginning with # are ignored.
+#
+# private-person-marker
+# private-project-marker
+# private-host-marker
