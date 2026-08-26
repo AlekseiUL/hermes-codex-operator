@@ -59,8 +59,22 @@ def turn_record(
     *,
     status: str = "completed",
     include_final: bool = True,
+    client_id: str | None = None,
+    input_text: str = "Build the synthetic widget.",
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = [
+        {
+            "id": "message-user",
+            "type": "userMessage",
+            "clientId": client_id,
+            "content": [
+                {
+                    "type": "text",
+                    "text": input_text,
+                    "text_elements": [],
+                }
+            ],
+        },
         {
             "id": "message-progress",
             "type": "agentMessage",
@@ -91,9 +105,14 @@ def turn_record(
     return record
 
 
-def thread_record(workspace: str, turns: list[dict[str, Any]]) -> dict[str, Any]:
+def thread_record(
+    workspace: str,
+    turns: list[dict[str, Any]],
+    *,
+    thread_id: str = THREAD_ID,
+) -> dict[str, Any]:
     return {
-        "id": THREAD_ID,
+        "id": thread_id,
         "cliVersion": "0.0.0-synthetic",
         "createdAt": 1,
         "updatedAt": 1,
@@ -139,7 +158,10 @@ def main() -> None:
     initialize = expect("initialize")
     assert initialize["params"]["clientInfo"]["name"] == "hermes-codex-operator"
     assert initialize["params"]["clientInfo"]["title"] == "Hermes Codex Operator"
-    assert initialize["params"]["clientInfo"]["version"] == "0.0.1"
+    assert initialize["params"]["clientInfo"]["version"] == "0.1.0"
+    assert initialize["params"]["capabilities"]["experimentalApi"] is (
+        SCENARIO in {"queue_protocol", "queue_protocol_wrong_version"}
+    )
     # Proves that the client starts its stdout reader before waiting on the
     # initialize response.
     send({"method": "account/updated", "params": {}})
@@ -149,14 +171,116 @@ def main() -> None:
             "codexHome": os.path.abspath(".synthetic-codex-home"),
             "platformFamily": "unix",
             "platformOs": "synthetic",
-            "userAgent": "synthetic-app-server",
+            "userAgent": (
+                "codex_cli_rs/0.150.0"
+                if SCENARIO == "queue_protocol_wrong_version"
+                else "codex_cli_rs/0.149.0"
+                if SCENARIO == "queue_protocol"
+                else "synthetic-app-server"
+            ),
         },
     )
     initialized = expect("initialized")
     assert set(initialized) == {"method"}
 
+    if SCENARIO == "queue_protocol_wrong_version":
+        wait_until_killed()
+
+    if SCENARIO == "queue_protocol":
+        loaded = expect("thread/loaded/list")
+        assert loaded["params"] == {"limit": 100}
+        response(loaded, {"data": [THREAD_ID], "nextCursor": None})
+        listed = expect("thread/queue/list")
+        assert listed["params"] == {"threadId": THREAD_ID, "limit": 100}
+        response(listed, {"data": [], "nextCursor": None})
+        added = expect("thread/queue/add")
+        assert added["params"] == {
+            "threadId": THREAD_ID,
+            "clientUserMessageId": "client-synthetic-001",
+            "input": [
+                {
+                    "type": "text",
+                    "text": "Synthetic queued input.",
+                    "text_elements": [],
+                }
+            ],
+        }
+        submission = {
+            "id": "submission-synthetic-001",
+            "clientUserMessageId": "client-synthetic-001",
+            "input": [
+                {
+                    "type": "text",
+                    "text": "Synthetic queued input.",
+                    "text_elements": [],
+                }
+            ],
+        }
+        response(added, {"queuedSubmission": submission})
+        started = expect("thread/queue/start")
+        assert started["params"] == {
+            "threadId": THREAD_ID,
+            "queuedSubmissionId": "submission-synthetic-001",
+        }
+        response(
+            started,
+            {
+                "turn": turn_record(
+                    status="inProgress",
+                    include_final=False,
+                    client_id="client-synthetic-001",
+                    input_text="Synthetic queued input.",
+                )
+            },
+        )
+        wait_until_killed()
+
+    if SCENARIO == "catalog_read":
+        read = expect("thread/read")
+        assert read["params"] == {"threadId": THREAD_ID, "includeTurns": True}
+        response(
+            read,
+            {
+                "thread": thread_record(
+                    os.path.abspath("."),
+                    [turn_record(client_id="client-synthetic-001")],
+                )
+            },
+        )
+        wait_until_killed()
+
+    if SCENARIO in {"catalog_pages", "catalog_malformed"}:
+        first = expect("thread/list")
+        assert first["params"] == {"limit": 1}
+        if SCENARIO == "catalog_malformed":
+            response(first, {"data": [{"id": THREAD_ID}], "nextCursor": None})
+            wait_until_killed()
+        response(
+            first,
+            {
+                "data": [thread_record(os.path.abspath("."), [turn_record()])],
+                "nextCursor": "cursor-synthetic-2",
+            },
+        )
+        second = expect("thread/list")
+        assert second["params"] == {"limit": 1, "cursor": "cursor-synthetic-2"}
+        response(
+            second,
+            {
+                "data": [
+                    thread_record(
+                        os.path.abspath("."), [], thread_id="thread-synthetic-002"
+                    )
+                ],
+                "nextCursor": None,
+            },
+        )
+        wait_until_killed()
+
     expected_thread_method = (
-        "thread/resume" if SCENARIO in {"resume", "resume_read_only"} else "thread/start"
+        "thread/resume"
+        if SCENARIO in {"resume", "resume_read_only", "resume_timeout"}
+        else "thread/start"
     )
     thread_request = expect(expected_thread_method)
     thread_params = thread_request["params"]
@@ -169,6 +293,8 @@ def main() -> None:
     if expected_thread_method == "thread/resume":
         assert thread_params["threadId"] == THREAD_ID
     workspace = thread_params["cwd"]
+    if SCENARIO == "resume_timeout":
+        wait_until_killed()
     sandbox_type = {
         "read-only": "readOnly",
         "workspace-write": "workspaceWrite",

@@ -5,22 +5,35 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import signal
+import stat
 import subprocess
 from typing import Any, Mapping, Sequence, cast
+
+from websockets.asyncio.client import ClientConnection, unix_connect
+from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from .base import (
     AdapterClosed,
     AdapterError,
     AdapterTimeout,
     AppServerProcessError,
+    CatalogUserMessage,
     DeliveryUnknown,
+    LoadedThreadPage,
     ProtocolIntegrityError,
+    QueuePage,
+    QueuedSubmission,
     ReadbackMissingResult,
     RemoteRequestError,
     RemoteTurnFailed,
     ThreadHandle,
+    CatalogTurn,
+    ThreadCatalogReadback,
     ThreadOptions,
+    ThreadPage,
+    ThreadSummary,
     TurnHandle,
     TurnInProgress,
     TurnOptions,
@@ -28,6 +41,7 @@ from .base import (
     TurnTerminalStatus,
     validate_command,
 )
+from ..models import canonical_json, sha256_text
 
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "interrupted"})
@@ -37,6 +51,68 @@ _SANDBOX_TYPES = {
     "workspace-write": "workspaceWrite",
     "danger-full-access": "dangerFullAccess",
 }
+EXPERIMENTAL_QUEUE_API_VERSION = "0.149.0"
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedAppServerEndpoint:
+    socket_path: Path
+    app_server_version: str
+
+
+def discover_managed_app_server(
+    *,
+    expected_version: str,
+    command: Sequence[str] = ("codex", "app-server", "daemon", "version"),
+    timeout: float = 5.0,
+) -> ManagedAppServerEndpoint:
+    """Read the official daemon endpoint JSON without starting or stopping it."""
+
+    argv = validate_command(command)
+    try:
+        completed = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AppServerProcessError("could not inspect managed Codex App Server") from exc
+    if completed.returncode != 0:
+        raise AppServerProcessError("managed Codex App Server is unavailable")
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ProtocolIntegrityError("daemon version output is not valid JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise ProtocolIntegrityError("daemon version output must be an object")
+    raw_path = payload.get("socketPath")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise ProtocolIntegrityError("daemon version output omitted socketPath")
+    socket_path = Path(raw_path)
+    if not socket_path.is_absolute():
+        raise ProtocolIntegrityError("daemon socketPath must be absolute")
+    try:
+        mode = socket_path.stat().st_mode
+    except OSError as exc:
+        raise AppServerProcessError("App Server Unix socket is unavailable") from exc
+    if not stat.S_ISSOCK(mode):
+        raise AppServerProcessError("App Server Unix socket path is not a socket")
+    app_server_version = payload.get("appServerVersion")
+    if not isinstance(app_server_version, str) or not app_server_version:
+        raise ProtocolIntegrityError("daemon version output omitted appServerVersion")
+    if app_server_version != expected_version:
+        from .base import UnsupportedCapability
+
+        raise UnsupportedCapability("UNSUPPORTED_CAPABILITY")
+    return ManagedAppServerEndpoint(socket_path, app_server_version)
+
+
+class QueueIdentityConflict(ProtocolIntegrityError):
+    """A successful queue response contradicted the requested identity."""
 
 
 @dataclass(slots=True)
@@ -49,9 +125,10 @@ class _PendingRequest:
 
 
 class AppServerAdapter:
-    """Minimal JSONL client for the official Codex App Server stdio surface.
+    """Minimal client for the official Codex App Server transport surfaces.
 
-    The wire format is JSONL, not JSON-RPC 2.0: messages intentionally omit a
+    Stdio uses JSONL. The managed transport connects directly to Codex's Unix
+    socket with the ``websockets`` library. Messages intentionally omit a
     ``jsonrpc`` member. Streamed notifications are observed only for lifecycle
     coordination; ``thread/read`` is always the source of returned model text.
     """
@@ -65,7 +142,9 @@ class AppServerAdapter:
         stderr_limit_bytes: int = 64 * 1024,
         stdout_line_limit_bytes: int = 4 * 1024 * 1024,
         client_name: str = "hermes-codex-operator",
-        client_version: str = "0.0.1",
+        client_version: str = "0.1.0",
+        experimental_api_version: str | None = None,
+        unix_socket_path: Path | None = None,
     ) -> None:
         self._command = validate_command(command)
         if request_timeout <= 0 or shutdown_timeout <= 0:
@@ -74,6 +153,10 @@ class AppServerAdapter:
             raise ValueError("stream limits are too small")
         if not client_name or not client_version:
             raise ValueError("client identity must be non-empty")
+        if experimental_api_version not in {None, EXPERIMENTAL_QUEUE_API_VERSION}:
+            from .base import UnsupportedCapability
+
+            raise UnsupportedCapability("UNSUPPORTED_CAPABILITY")
 
         self._request_timeout = request_timeout
         self._shutdown_timeout = shutdown_timeout
@@ -81,9 +164,12 @@ class AppServerAdapter:
         self._stdout_line_limit = stdout_line_limit_bytes
         self._client_name = client_name
         self._client_version = client_version
+        self._experimental_api_version = experimental_api_version
+        self._unix_socket_path = Path(unix_socket_path) if unix_socket_path is not None else None
 
         self._process: asyncio.subprocess.Process | None = None
         self._process_group_id: int | None = None
+        self._websocket: ClientConnection | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._pending: dict[int, _PendingRequest] = {}
@@ -132,36 +218,16 @@ class AppServerAdapter:
             if self._started:
                 self._raise_if_fatal()
                 return
-            spawn_options: dict[str, Any] = {}
-            if os.name == "posix":
-                spawn_options["start_new_session"] = True
-            elif os.name == "nt":
-                spawn_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-
+            if self._unix_socket_path is not None:
+                await self._connect_unix_socket()
+            else:
+                await self._spawn_stdio_server()
             try:
-                process = await asyncio.create_subprocess_exec(
-                    *self._command,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    limit=self._stdout_line_limit,
-                    **spawn_options,
+                # The reader must exist before initialize: the server may emit a
+                # notification before its initialize response.
+                self._reader_task = asyncio.create_task(
+                    self._reader_loop(), name="codex-app-server-reader"
                 )
-            except (OSError, ValueError) as exc:
-                raise AppServerProcessError("could not start Codex App Server") from exc
-
-            self._process = process
-            if os.name == "posix":
-                self._process_group_id = process.pid
-            # The reader must exist before initialize: the server may emit a
-            # notification before its initialize response.
-            self._reader_task = asyncio.create_task(
-                self._reader_loop(), name="codex-app-server-stdout"
-            )
-            self._stderr_task = asyncio.create_task(
-                self._stderr_loop(), name="codex-app-server-stderr"
-            )
-            try:
                 initialize_result = await self._request(
                     "initialize",
                     {
@@ -170,7 +236,9 @@ class AppServerAdapter:
                             "title": "Hermes Codex Operator",
                             "version": self._client_version,
                         },
-                        "capabilities": {"experimentalApi": False},
+                        "capabilities": {
+                            "experimentalApi": self._experimental_api_version is not None
+                        },
                     },
                     side_effect=False,
                 )
@@ -180,6 +248,54 @@ class AppServerAdapter:
                 await self.close()
                 raise
             self._started = True
+
+    async def _connect_unix_socket(self) -> None:
+        path = self._unix_socket_path
+        assert path is not None
+        if os.name != "posix" or not path.is_absolute():
+            raise AppServerProcessError("App Server Unix socket path is unsupported")
+        try:
+            mode = path.stat().st_mode
+        except OSError as exc:
+            raise AppServerProcessError("App Server Unix socket is unavailable") from exc
+        if not stat.S_ISSOCK(mode):
+            raise AppServerProcessError("App Server Unix socket path is not a socket")
+        try:
+            self._websocket = await unix_connect(
+                path=os.fspath(path),
+                uri="ws://localhost/rpc",
+                open_timeout=self._request_timeout,
+                close_timeout=self._shutdown_timeout,
+                max_size=self._stdout_line_limit,
+                compression=None,
+                ping_interval=None,
+            )
+        except (OSError, WebSocketException, asyncio.TimeoutError) as exc:
+            raise AppServerProcessError("could not connect to Codex App Server socket") from exc
+
+    async def _spawn_stdio_server(self) -> None:
+        spawn_options: dict[str, Any] = {}
+        if os.name == "posix":
+            spawn_options["start_new_session"] = True
+        elif os.name == "nt":
+            spawn_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *self._command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=self._stdout_line_limit,
+                **spawn_options,
+            )
+        except (OSError, ValueError) as exc:
+            raise AppServerProcessError("could not start Codex App Server") from exc
+        self._process = process
+        if os.name == "posix":
+            self._process_group_id = process.pid
+        self._stderr_task = asyncio.create_task(
+            self._stderr_loop(), name="codex-app-server-stderr"
+        )
 
     async def start_thread(
         self,
@@ -206,6 +322,140 @@ class AppServerAdapter:
         )
         return ThreadHandle(thread_id=thread_id, workspace=workspace)
 
+    async def list_threads(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> ThreadPage:
+        """Read one bounded catalog page without resuming or mutating threads."""
+
+        await self._ensure_started()
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("thread/list limit must be an integer from 1 to 100")
+        params: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = self._nonempty_string(cursor, "cursor")
+        result = await self._request("thread/list", params, side_effect=False)
+        if not isinstance(result, Mapping):
+            raise ProtocolIntegrityError("thread/list result must be an object")
+        data = result.get("data")
+        if not isinstance(data, list):
+            raise ProtocolIntegrityError("thread/list result.data must be an array")
+        if len(data) > limit:
+            raise ProtocolIntegrityError("thread/list returned more rows than requested")
+        raw_cursor = result.get("nextCursor")
+        if raw_cursor is not None and not isinstance(raw_cursor, str):
+            raise ProtocolIntegrityError("thread/list nextCursor must be a string or null")
+        if raw_cursor == "":
+            raise ProtocolIntegrityError("thread/list nextCursor must not be empty")
+        summaries = tuple(self._parse_thread_summary(item) for item in data)
+        identities = tuple(item.thread_id for item in summaries)
+        if len(set(identities)) != len(identities):
+            raise ProtocolIntegrityError("thread/list returned duplicate thread ids")
+        return ThreadPage(summaries, raw_cursor)
+
+    async def read_thread(self, thread_id: str) -> ThreadCatalogReadback:
+        """Read one exact stored thread without resuming or subscribing to it."""
+
+        await self._ensure_started()
+        expected = self._nonempty_string(thread_id, "thread_id")
+        result = await self._request(
+            "thread/read",
+            {"threadId": expected, "includeTurns": True},
+            side_effect=False,
+        )
+        thread = self._result_object(result, "thread/read", "thread")
+        summary = self._parse_thread_summary(thread)
+        if summary.thread_id != expected:
+            raise ProtocolIntegrityError("thread/read returned a different thread id")
+
+        raw_turns = thread.get("turns")
+        assert isinstance(raw_turns, list)  # validated by _parse_thread_summary
+        turns = tuple(self._parse_catalog_turn(turn) for turn in raw_turns)
+        identities = tuple(turn.turn_id for turn in turns)
+        if len(set(identities)) != len(identities):
+            raise ProtocolIntegrityError("thread/read returned duplicate turn ids")
+        return ThreadCatalogReadback(summary, turns)
+
+    async def list_loaded_threads(
+        self, *, cursor: str | None = None, limit: int = 100
+    ) -> LoadedThreadPage:
+        self._require_queue_capability()
+        await self._ensure_started()
+        self._validate_page_limit(limit, "thread/loaded/list")
+        params: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = self._nonempty_string(cursor, "cursor")
+        result = await self._request("thread/loaded/list", params, side_effect=False)
+        data, next_cursor = self._parse_page(result, "thread/loaded/list", limit)
+        ids = tuple(self._nonempty_string(item, "thread/loaded/list data") for item in data)
+        return LoadedThreadPage(ids, next_cursor)
+
+    async def list_queue(
+        self, thread_id: str, *, cursor: str | None = None, limit: int = 100
+    ) -> QueuePage:
+        self._require_queue_capability()
+        await self._ensure_started()
+        expected = self._nonempty_string(thread_id, "thread_id")
+        self._validate_page_limit(limit, "thread/queue/list")
+        params: dict[str, Any] = {"threadId": expected, "limit": limit}
+        if cursor is not None:
+            params["cursor"] = self._nonempty_string(cursor, "cursor")
+        result = await self._request("thread/queue/list", params, side_effect=False)
+        data, next_cursor = self._parse_page(result, "thread/queue/list", limit)
+        submissions = tuple(self._parse_queued_submission(item) for item in data)
+        identities = tuple(item.submission_id for item in submissions)
+        if len(set(identities)) != len(identities):
+            raise ProtocolIntegrityError("thread/queue/list returned duplicate submission ids")
+        return QueuePage(submissions, next_cursor)
+
+    async def add_queue(
+        self, thread_id: str, prompt: str, client_message_id: str
+    ) -> QueuedSubmission:
+        self._require_queue_capability()
+        await self._ensure_started()
+        expected = self._nonempty_string(thread_id, "thread_id")
+        text = self._nonempty_string(prompt, "prompt")
+        client_id = self._nonempty_string(client_message_id, "client_message_id")
+        normalized_input = [
+            {"type": "text", "text": text, "text_elements": []}
+        ]
+        result = await self._request(
+            "thread/queue/add",
+            {
+                "threadId": expected,
+                "clientUserMessageId": client_id,
+                "input": normalized_input,
+            },
+            side_effect=True,
+        )
+        queued = self._result_object(result, "thread/queue/add", "queuedSubmission")
+        submission = self._parse_queued_submission(queued)
+        if submission.client_message_id != client_id:
+            raise QueueIdentityConflict(
+                "thread/queue/add changed client message identity"
+            )
+        expected_digest = sha256_text(canonical_json({"input": normalized_input}))
+        if submission.input_sha256 != expected_digest:
+            raise QueueIdentityConflict("thread/queue/add changed queued input")
+        return submission
+
+    async def start_queued_turn(
+        self, thread_id: str, submission_id: str
+    ) -> TurnHandle:
+        self._require_queue_capability()
+        await self._ensure_started()
+        expected = self._nonempty_string(thread_id, "thread_id")
+        submission = self._nonempty_string(submission_id, "submission_id")
+        result = await self._request(
+            "thread/queue/start",
+            {"threadId": expected, "queuedSubmissionId": submission},
+            side_effect=True,
+        )
+        turn = self._result_object(result, "thread/queue/start", "turn")
+        return TurnHandle(
+            expected,
+            self._nonempty_string(turn.get("id"), "thread/queue/start turn.id"),
+        )
+
     async def resume_thread(
         self,
         thread_id: str,
@@ -228,7 +478,9 @@ class AppServerAdapter:
         result = await self._request(
             "thread/resume",
             params,
-            side_effect=False,
+            # Resuming is part of the continuation mutation boundary. A lost
+            # response is delivery-ambiguous and must never be retried.
+            side_effect=True,
         )
         actual = self._validate_thread_result(
             result,
@@ -524,51 +776,62 @@ class AppServerAdapter:
         *,
         pending: _PendingRequest | None = None,
     ) -> None:
-        process = self._process
-        if process is None or process.stdin is None or process.returncode is not None:
-            raise AppServerProcessError(
-                "Codex App Server stdin is unavailable",
-                returncode=None if process is None else process.returncode,
-            )
         try:
-            encoded = (
-                json.dumps(
-                    dict(message),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                + b"\n"
+            encoded = json.dumps(
+                dict(message),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
             )
         except (TypeError, ValueError) as exc:
             raise ProtocolIntegrityError("outgoing message is not valid JSON") from exc
+        if len(encoded.encode("utf-8")) > self._stdout_line_limit:
+            raise ProtocolIntegrityError("outgoing App Server message is too large")
 
         async with self._write_lock:
-            process.stdin.write(encoded)
+            websocket = self._websocket
+            if websocket is not None:
+                if pending is not None:
+                    pending.sent = True
+                await websocket.send(encoded)
+                return
+            process = self._process
+            if process is None or process.stdin is None or process.returncode is not None:
+                raise AppServerProcessError(
+                    "Codex App Server stdin is unavailable",
+                    returncode=None if process is None else process.returncode,
+                )
+            process.stdin.write(encoded.encode("utf-8") + b"\n")
             if pending is not None:
                 pending.sent = True
             await process.stdin.drain()
 
     async def _reader_loop(self) -> None:
         process = self._process
-        if process is None or process.stdout is None:
+        websocket = self._websocket
+        if websocket is None and (process is None or process.stdout is None):
             return
         try:
             while True:
-                line = await process.stdout.readline()
-                if not line:
+                if websocket is not None:
+                    payload = await websocket.recv()
+                else:
+                    assert process is not None and process.stdout is not None
+                    line = await process.stdout.readline()
+                    payload = line if line else None
+                if payload is None:
                     if not self._closing:
                         error = AppServerProcessError(
                             "Codex App Server closed stdout",
-                            returncode=process.returncode,
+                            returncode=None if process is None else process.returncode,
                         )
                         self._set_fatal(error)
                         asyncio.create_task(self._terminate_process_group())
                     return
                 try:
-                    message = json.loads(line)
+                    message = json.loads(payload)
                 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                    raise ProtocolIntegrityError("App Server emitted invalid JSONL") from exc
+                    raise ProtocolIntegrityError("App Server emitted invalid JSON") from exc
                 if not isinstance(message, dict):
                     raise ProtocolIntegrityError("App Server message must be an object")
                 await self._handle_message(message)
@@ -578,12 +841,18 @@ class AppServerAdapter:
             self._set_fatal(exc)
             if not self._closing:
                 asyncio.create_task(self._terminate_process_group())
+        except ConnectionClosed as exc:
+            if not self._closing:
+                error = AppServerProcessError("Codex App Server closed the WebSocket")
+                error.__cause__ = exc
+                self._set_fatal(error)
         except (ValueError, OSError) as exc:
-            error = ProtocolIntegrityError("failed while reading App Server JSONL")
+            error = ProtocolIntegrityError("failed while reading App Server transport")
             error.__cause__ = exc
             self._set_fatal(error)
             if not self._closing:
                 asyncio.create_task(self._terminate_process_group())
+
 
     async def _stderr_loop(self) -> None:
         process = self._process
@@ -721,6 +990,16 @@ class AppServerAdapter:
 
     async def _terminate_process_group(self) -> None:
         async with self._terminate_lock:
+            websocket = self._websocket
+            if websocket is not None:
+                self._websocket = None
+                try:
+                    await asyncio.wait_for(
+                        websocket.close(), timeout=self._shutdown_timeout
+                    )
+                except (asyncio.TimeoutError, WebSocketException):
+                    pass
+                return
             process = self._process
             if process is None:
                 return
@@ -809,6 +1088,15 @@ class AppServerAdapter:
             raise ProtocolIntegrityError("initialize codexHome must be absolute")
         for field in ("platformFamily", "platformOs", "userAgent"):
             self._nonempty_string(result.get(field), f"initialize {field}")
+        if self._experimental_api_version is not None:
+            user_agent = result["userAgent"]
+            version = re.search(
+                r"(?:^|[\s/])(\d+\.\d+\.\d+)(?:$|[\s;(])", user_agent
+            )
+            if version is None or version.group(1) != self._experimental_api_version:
+                from .base import UnsupportedCapability
+
+                raise UnsupportedCapability("UNSUPPORTED_CAPABILITY")
 
     def _validate_thread_result(
         self,
@@ -869,6 +1157,106 @@ class AppServerAdapter:
         if not isinstance(thread.get("preview"), str):
             raise ProtocolIntegrityError(f"{method} thread.preview must be a string")
         return thread_id
+
+    def _parse_thread_summary(self, value: Any) -> ThreadSummary:
+        if not isinstance(value, Mapping):
+            raise ProtocolIntegrityError("thread/list data contains a non-object")
+        thread_id = self._nonempty_string(value.get("id"), "thread/list thread.id")
+        cwd_raw = self._nonempty_string(value.get("cwd"), "thread/list thread.cwd")
+        cwd = Path(cwd_raw)
+        if not cwd.is_absolute():
+            raise ProtocolIntegrityError("thread/list thread.cwd must be absolute")
+        preview = value.get("preview")
+        if not isinstance(preview, str):
+            raise ProtocolIntegrityError("thread/list thread.preview must be a string")
+        status_value = value.get("status")
+        if isinstance(status_value, Mapping):
+            status = self._nonempty_string(status_value.get("type"), "thread/list status.type")
+        elif isinstance(status_value, str) and status_value:
+            status = status_value
+        else:
+            raise ProtocolIntegrityError("thread/list thread.status is invalid")
+        timestamps: list[int] = []
+        for field in ("createdAt", "updatedAt"):
+            raw = value.get(field)
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+                raise ProtocolIntegrityError(f"thread/list thread.{field} must be non-negative")
+            timestamps.append(raw)
+        raw_turns = value.get("turns")
+        if not isinstance(raw_turns, list):
+            raise ProtocolIntegrityError("thread/list thread.turns must be an array")
+        turn_ids: list[str] = []
+        for turn in raw_turns:
+            if not isinstance(turn, Mapping):
+                raise ProtocolIntegrityError("thread/list thread.turns contains a non-object")
+            turn_ids.append(self._nonempty_string(turn.get("id"), "thread/list turn.id"))
+        if len(set(turn_ids)) != len(turn_ids):
+            raise ProtocolIntegrityError("thread/list thread contains duplicate turn ids")
+        return ThreadSummary(
+            thread_id=thread_id,
+            cwd=cwd,
+            preview=preview,
+            status=status,
+            created_at=timestamps[0],
+            updated_at=timestamps[1],
+            turn_ids=tuple(turn_ids),
+        )
+
+    def _parse_catalog_turn(self, value: Any) -> CatalogTurn:
+        if not isinstance(value, Mapping):
+            raise ProtocolIntegrityError("thread/read thread.turns contains a non-object")
+        turn_id = self._nonempty_string(value.get("id"), "thread/read turn.id")
+        status = value.get("status")
+        if status not in _KNOWN_TURN_STATUSES:
+            raise ProtocolIntegrityError("thread/read turn has an unknown status")
+        raw_items = value.get("items")
+        if not isinstance(raw_items, list) or any(
+            not isinstance(item, Mapping) for item in raw_items
+        ):
+            raise ProtocolIntegrityError("thread/read turn.items must be an object array")
+        final_messages: list[str] = []
+        legacy_messages: list[str] = []
+        user_messages: list[CatalogUserMessage] = []
+        for item in raw_items:
+            if item.get("type") == "userMessage":
+                client_id = item.get("clientId")
+                if client_id is not None and (
+                    not isinstance(client_id, str) or not client_id
+                ):
+                    raise ProtocolIntegrityError(
+                        "thread/read userMessage.clientId must be a non-empty string or null"
+                    )
+                raw_content = item.get("content")
+                if not isinstance(raw_content, list) or not raw_content or any(
+                    not isinstance(content, Mapping) for content in raw_content
+                ):
+                    raise ProtocolIntegrityError(
+                        "thread/read userMessage.content must be a non-empty object array"
+                    )
+                normalized = [dict(content) for content in raw_content]
+                user_messages.append(
+                    CatalogUserMessage(
+                        client_id,
+                        sha256_text(canonical_json({"input": normalized})),
+                    )
+                )
+                continue
+            if item.get("type") != "agentMessage":
+                continue
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            if item.get("phase") == "final_answer":
+                final_messages.append(text)
+            elif item.get("phase") is None:
+                legacy_messages.append(text)
+        candidates = final_messages or legacy_messages
+        return CatalogTurn(
+            turn_id,
+            status,
+            candidates[-1] if candidates else None,
+            tuple(user_messages),
+        )
 
     @staticmethod
     def _validate_effective_cwd(value: Any, workspace: Path, field: str) -> None:
@@ -962,6 +1350,51 @@ class AppServerAdapter:
     def _include(target: dict[str, Any], key: str, value: Any) -> None:
         if value is not None:
             target[key] = value
+
+    def _require_queue_capability(self) -> None:
+        if self._experimental_api_version != EXPERIMENTAL_QUEUE_API_VERSION:
+            from .base import UnsupportedCapability
+
+            raise UnsupportedCapability("UNSUPPORTED_CAPABILITY")
+
+    @staticmethod
+    def _validate_page_limit(limit: int, method: str) -> None:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError(f"{method} limit must be an integer from 1 to 100")
+
+    @staticmethod
+    def _parse_page(result: Any, method: str, limit: int) -> tuple[list[Any], str | None]:
+        if not isinstance(result, Mapping):
+            raise ProtocolIntegrityError(f"{method} result must be an object")
+        data = result.get("data")
+        if not isinstance(data, list) or len(data) > limit:
+            raise ProtocolIntegrityError(f"{method} result.data is invalid")
+        cursor = result.get("nextCursor")
+        if cursor is not None and (not isinstance(cursor, str) or not cursor):
+            raise ProtocolIntegrityError(f"{method} nextCursor is invalid")
+        return data, cursor
+
+    def _parse_queued_submission(self, value: Any) -> QueuedSubmission:
+        if not isinstance(value, Mapping):
+            raise ProtocolIntegrityError("queued submission must be an object")
+        submission_id = self._nonempty_string(value.get("id"), "queued submission id")
+        client_id = self._nonempty_string(
+            value.get("clientUserMessageId"),
+            "queued submission clientUserMessageId",
+        )
+        raw_input = value.get("input")
+        if not isinstance(raw_input, list) or not raw_input or any(
+            not isinstance(item, Mapping) for item in raw_input
+        ):
+            raise ProtocolIntegrityError(
+                "queued submission input must be a non-empty object array"
+            )
+        normalized = [dict(item) for item in raw_input]
+        return QueuedSubmission(
+            submission_id,
+            client_id,
+            sha256_text(canonical_json({"input": normalized})),
+        )
 
     @staticmethod
     def _nonempty_string(value: Any, field: str) -> str:

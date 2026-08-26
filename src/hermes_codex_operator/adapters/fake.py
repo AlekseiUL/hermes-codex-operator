@@ -9,16 +9,26 @@ from .base import (
     AdapterTimeout,
     AppServerProcessError,
     DeliveryUnknown,
+    LoadedThreadPage,
+    CatalogTurn,
+    CatalogUserMessage,
+    ProtocolIntegrityError,
+    QueuePage,
+    QueuedSubmission,
     ReadbackMissingResult,
     RemoteTurnFailed,
     ThreadHandle,
+    ThreadCatalogReadback,
     ThreadOptions,
+    ThreadPage,
+    ThreadSummary,
     TurnHandle,
     TurnInProgress,
     TurnOptions,
     TurnReadback,
     TurnTerminalStatus,
 )
+from ..models import canonical_json, sha256_text
 
 
 @dataclass(slots=True)
@@ -35,7 +45,22 @@ class FakeBackend:
     resume_thread_calls: int = 0
     start_turn_calls: int = 0
     read_turn_calls: int = 0
+    read_thread_calls: int = 0
     last_workspace: Path | None = None
+    list_thread_calls: int = 0
+    list_pages: dict[str | None, ThreadPage] = field(default_factory=dict)
+    thread_statuses: dict[str, str] = field(default_factory=dict)
+    loaded_thread_ids: list[str] = field(default_factory=list)
+    queued: dict[str, list[QueuedSubmission]] = field(default_factory=dict)
+    turn_submissions: dict[tuple[str, str], QueuedSubmission] = field(
+        default_factory=dict
+    )
+    queue_add_calls: int = 0
+    queue_list_calls: int = 0
+    queue_start_calls: int = 0
+    loaded_list_calls: int = 0
+    wait_turn_ids: list[str] = field(default_factory=list)
+    submission_id: str = "submission-synthetic-001"
 
 
 class FakeCodexAdapter:
@@ -48,6 +73,130 @@ class FakeCodexAdapter:
     def _ensure_open(self) -> None:
         if self._closed:
             raise AdapterClosed("fake adapter is closed")
+
+    async def list_threads(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> ThreadPage:
+        self._ensure_open()
+        self.backend.list_thread_calls += 1
+        page = self.backend.list_pages.get(cursor)
+        if page is not None:
+            return page
+        threads = tuple(
+            ThreadSummary(
+                thread_id=thread_id,
+                cwd=workspace,
+                preview="Synthetic thread",
+                status="idle",
+                created_at=1,
+                updated_at=1,
+                turn_ids=tuple(
+                    turn_id for candidate, turn_id in self.backend.turns if candidate == thread_id
+                ),
+            )
+            for thread_id, workspace in self.backend.threads.items()
+        )
+        return ThreadPage(threads[:limit], None)
+
+    async def read_thread(self, thread_id: str) -> ThreadCatalogReadback:
+        self._ensure_open()
+        self.backend.read_thread_calls += 1
+        workspace = self.backend.threads[thread_id]
+        turns: list[CatalogTurn] = []
+        for (candidate, turn_id), status in self.backend.turns.items():
+            if candidate != thread_id:
+                continue
+            submission = self.backend.turn_submissions.get((candidate, turn_id))
+            user_messages = (
+                (
+                    CatalogUserMessage(
+                        submission.client_message_id,
+                        submission.input_sha256,
+                    ),
+                )
+                if submission is not None
+                else ()
+            )
+            turns.append(
+                CatalogTurn(
+                    turn_id,
+                    status,
+                    self.backend.final_text if status == "completed" else None,
+                    user_messages,
+                )
+            )
+        summary = ThreadSummary(
+            thread_id,
+            workspace,
+            "Synthetic thread",
+            self.backend.thread_statuses.get(thread_id, "idle"),
+            1,
+            1,
+            tuple(turn.turn_id for turn in turns),
+        )
+        return ThreadCatalogReadback(summary, tuple(turns))
+
+    async def list_loaded_threads(
+        self, *, cursor: str | None = None, limit: int = 100
+    ) -> LoadedThreadPage:
+        self._ensure_open()
+        self.backend.loaded_list_calls += 1
+        ids = self.backend.loaded_thread_ids or list(self.backend.threads)
+        return LoadedThreadPage(tuple(ids[:limit]), None)
+
+    async def list_queue(
+        self, thread_id: str, *, cursor: str | None = None, limit: int = 100
+    ) -> QueuePage:
+        self._ensure_open()
+        self.backend.queue_list_calls += 1
+        return QueuePage(tuple(self.backend.queued.get(thread_id, ())[:limit]), None)
+
+    async def add_queue(
+        self, thread_id: str, prompt: str, client_message_id: str
+    ) -> QueuedSubmission:
+        self._ensure_open()
+        self.backend.queue_add_calls += 1
+        submission = QueuedSubmission(
+            self.backend.submission_id,
+            client_message_id,
+            sha256_text(
+                canonical_json(
+                    {
+                        "input": [
+                            {"text": prompt, "text_elements": [], "type": "text"}
+                        ]
+                    }
+                )
+            ),
+        )
+        self.backend.queued.setdefault(thread_id, []).append(submission)
+        if self.backend.fail_at == "queue_add_delivery_unknown":
+            raise DeliveryUnknown("thread/queue/add", 4, timeout_seconds=0.01)
+        if self.backend.fail_at == "queue_add_malformed":
+            raise ProtocolIntegrityError("synthetic malformed queue/add response")
+        return submission
+
+    async def start_queued_turn(
+        self, thread_id: str, submission_id: str
+    ) -> TurnHandle:
+        self._ensure_open()
+        self.backend.queue_start_calls += 1
+        matching = [
+            item
+            for item in self.backend.queued.get(thread_id, ())
+            if item.submission_id == submission_id
+        ]
+        if len(matching) != 1:
+            raise ProtocolIntegrityError("synthetic queue submission identity mismatch")
+        self.backend.queued[thread_id].remove(matching[0])
+        self.backend.turn_submissions[(thread_id, self.backend.turn_id)] = matching[0]
+        workspace = self.backend.threads[thread_id]
+        if self.backend.mutate_workspace is not None:
+            self.backend.mutate_workspace(workspace)
+        self.backend.turns[(thread_id, self.backend.turn_id)] = self.backend.terminal_status
+        if self.backend.fail_at == "queue_start_malformed":
+            raise ProtocolIntegrityError("synthetic malformed queue/start response")
+        return TurnHandle(thread_id, self.backend.turn_id)
 
     async def start_thread(
         self, workspace: Path, options: ThreadOptions | None = None
@@ -96,10 +245,16 @@ class FakeCodexAdapter:
         self, thread_id: str, turn_id: str, timeout: float
     ) -> TurnTerminalStatus:
         self._ensure_open()
+        self.backend.wait_turn_ids.append(turn_id)
         if self.backend.fail_at == "wait_timeout":
             raise AdapterTimeout("turn/completed", timeout)
         if self.backend.fail_at == "wait_transport_lost":
             raise AppServerProcessError("synthetic transport loss")
+        if (
+            turn_id != self.backend.turn_id
+            and self.backend.turns[(thread_id, turn_id)] == "inProgress"
+        ):
+            self.backend.turns[(thread_id, turn_id)] = "completed"
         return self.backend.turns[(thread_id, turn_id)]
 
     async def read_turn(self, thread_id: str, turn_id: str) -> TurnReadback:

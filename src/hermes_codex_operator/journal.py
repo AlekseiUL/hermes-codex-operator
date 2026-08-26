@@ -14,12 +14,14 @@ import errno
 import json
 import os
 from pathlib import Path
+import secrets
 import sqlite3
 import stat
 import threading
 from typing import Any, Iterator, Mapping
 
 from .models import (
+    ACTIVE_STATES,
     ContractValidationError,
     OperationState,
     Receipt,
@@ -33,7 +35,10 @@ from .models import (
 from .workspace import WorkspaceSnapshot, snapshot_from_dict, snapshot_to_dict
 
 
-DATABASE_VERSION = 1
+DATABASE_VERSION = 5
+DISPATCH_KINDS = frozenset({"ordinary", "continue", "queue"})
+WATCH_STATES = frozenset({"ACTIVE", "COMPLETED", "FAILED", "INTERRUPTED", "UNKNOWN"})
+WATCH_TERMINAL_STATES = WATCH_STATES - {"ACTIVE"}
 
 
 class JournalError(RuntimeError):
@@ -98,6 +103,7 @@ class OperationRecord:
     operation_id: str
     prompt_sha256: str
     contract_sha256: str
+    dispatch_kind: str
     state: OperationState
     turn_id: str | None
     failure_code: str | None
@@ -116,6 +122,50 @@ class Reservation:
 class Finalization:
     operation: OperationRecord
     receipt: Receipt
+
+
+@dataclass(frozen=True, slots=True)
+class WatchRecord:
+    watch_id: str
+    thread_id: str
+    turn_id: str
+    state: str
+    result_sha256: str | None
+    failure_code: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionEvent:
+    event_id: str
+    watch_id: str
+    thread_id: str
+    turn_id: str
+    status: str
+    result_sha256: str | None
+    created_at: str
+    acked_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuationBaseline:
+    operation_id: str
+    thread_id: str
+    turn_ids: tuple[str, ...]
+    turn_ids_sha256: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class QueueBaseline:
+    operation_id: str
+    thread_id: str
+    message_sha256: str
+    turn_ids: tuple[str, ...]
+    turn_ids_sha256: str
+    submission_id: str | None
+    created_at: str
 
 
 def _utc_now() -> str:
@@ -217,7 +267,7 @@ class SQLiteJournal:
             version = int(
                 self._connection.execute("PRAGMA user_version").fetchone()[0]
             )
-            if version not in (0, DATABASE_VERSION):
+            if version not in (0, 1, 2, 3, 4, DATABASE_VERSION):
                 raise JournalError("unsupported journal schema version")
             self._connection.execute(
                 """
@@ -238,6 +288,8 @@ class SQLiteJournal:
                     prompt_sha256 TEXT NOT NULL CHECK(length(prompt_sha256) = 64),
                     contract_sha256 TEXT NOT NULL CHECK(length(contract_sha256) = 64),
                     contract_json TEXT NOT NULL,
+                    dispatch_kind TEXT NOT NULL DEFAULT 'ordinary'
+                        CHECK(dispatch_kind IN ('ordinary', 'continue', 'queue')),
                     state TEXT NOT NULL,
                     turn_id TEXT UNIQUE,
                     failure_code TEXT,
@@ -246,6 +298,20 @@ class SQLiteJournal:
                 )
                 """
             )
+            operation_columns = {
+                row[1]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(operations)"
+                ).fetchall()
+            }
+            if "dispatch_kind" not in operation_columns:
+                self._connection.execute(
+                    """
+                    ALTER TABLE operations ADD COLUMN dispatch_kind TEXT NOT NULL
+                    DEFAULT 'ordinary'
+                    CHECK(dispatch_kind IN ('ordinary', 'continue', 'queue'))
+                    """
+                )
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS receipts (
@@ -305,6 +371,132 @@ class SQLiteJournal:
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS operations_task_id_idx ON operations(task_id)"
             )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS watches (
+                    watch_id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    result_sha256 TEXT,
+                    failure_code TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(thread_id, turn_id)
+                )
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS completion_events (
+                    event_id TEXT PRIMARY KEY,
+                    watch_id TEXT NOT NULL UNIQUE REFERENCES watches(watch_id),
+                    thread_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    result_sha256 TEXT,
+                    created_at TEXT NOT NULL,
+                    acked_at TEXT
+                )
+                """
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS completion_events_ack_idx "
+                "ON completion_events(acked_at, created_at)"
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS continuation_baselines (
+                    operation_id TEXT PRIMARY KEY REFERENCES operations(operation_id),
+                    thread_id TEXT NOT NULL,
+                    turn_ids_sha256 TEXT NOT NULL CHECK(length(turn_ids_sha256) = 64),
+                    turn_ids_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS continuation_baselines_are_immutable_on_update
+                BEFORE UPDATE ON continuation_baselines
+                BEGIN
+                    SELECT RAISE(ABORT, 'continuation baselines are immutable');
+                END
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS continuation_baselines_are_immutable_on_delete
+                BEFORE DELETE ON continuation_baselines
+                BEGIN
+                    SELECT RAISE(ABORT, 'continuation baselines are immutable');
+                END
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS queue_baselines (
+                    operation_id TEXT PRIMARY KEY REFERENCES operations(operation_id),
+                    thread_id TEXT NOT NULL,
+                    message_sha256 TEXT NOT NULL CHECK(length(message_sha256) = 64),
+                    turn_ids_sha256 TEXT NOT NULL CHECK(length(turn_ids_sha256) = 64),
+                    turn_ids_json TEXT NOT NULL,
+                    submission_id TEXT UNIQUE,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            if version in (0, 1, 2, 3, 4):
+                self._connection.execute(
+                    """
+                    UPDATE operations SET dispatch_kind = 'continue'
+                    WHERE operation_id IN (
+                        SELECT operation_id FROM continuation_baselines
+                    )
+                    """
+                )
+                self._connection.execute(
+                    """
+                    UPDATE operations SET dispatch_kind = 'queue'
+                    WHERE operation_id IN (
+                        SELECT operation_id FROM queue_baselines
+                    )
+                    """
+                )
+            self._connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS operations_dispatch_kind_is_immutable
+                BEFORE UPDATE OF dispatch_kind ON operations
+                WHEN OLD.dispatch_kind != NEW.dispatch_kind
+                BEGIN
+                    SELECT RAISE(ABORT, 'operation dispatch kind is immutable');
+                END
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS queue_baselines_identity_is_immutable
+                BEFORE UPDATE ON queue_baselines
+                WHEN OLD.operation_id != NEW.operation_id
+                  OR OLD.thread_id != NEW.thread_id
+                  OR OLD.message_sha256 != NEW.message_sha256
+                  OR OLD.turn_ids_sha256 != NEW.turn_ids_sha256
+                  OR OLD.turn_ids_json != NEW.turn_ids_json
+                  OR (OLD.submission_id IS NOT NULL AND OLD.submission_id != NEW.submission_id)
+                BEGIN
+                    SELECT RAISE(ABORT, 'queue baseline identity is immutable');
+                END
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS queue_baselines_are_immutable_on_delete
+                BEFORE DELETE ON queue_baselines
+                BEGIN
+                    SELECT RAISE(ABORT, 'queue baselines are immutable');
+                END
+                """
+            )
             try:
                 self._connection.execute(
                     """
@@ -312,6 +504,7 @@ class SQLiteJournal:
                     ON operations(task_id)
                     WHERE state IN (
                         'QUEUED', 'STARTING_THREAD', 'READY', 'DISPATCHING',
+                        'QUEUE_DISPATCH_IN_FLIGHT',
                         'RUNNING', 'TURN_COMPLETED', 'VERIFYING', 'TIMED_OUT',
                         'UNKNOWN'
                     )
@@ -321,7 +514,7 @@ class SQLiteJournal:
                 raise JournalError(
                     "journal already contains multiple open operations for one task"
                 ) from exc
-            if version == 0:
+            if version in (0, 1, 2, 3, 4):
                 self._connection.execute(f"PRAGMA user_version = {DATABASE_VERSION}")
 
     def _tighten_permissions(self) -> None:
@@ -373,11 +566,15 @@ class SQLiteJournal:
             state = OperationState(row["state"])
         except ValueError as exc:
             raise JournalError("journal contains an unknown operation state") from exc
+        dispatch_kind = row["dispatch_kind"]
+        if dispatch_kind not in DISPATCH_KINDS:
+            raise JournalError("journal contains an unknown dispatch kind")
         return OperationRecord(
             task_id=row["task_id"],
             operation_id=row["operation_id"],
             prompt_sha256=row["prompt_sha256"],
             contract_sha256=row["contract_sha256"],
+            dispatch_kind=dispatch_kind,
             state=state,
             turn_id=row["turn_id"],
             failure_code=row["failure_code"],
@@ -395,7 +592,12 @@ class SQLiteJournal:
             "SELECT * FROM operations WHERE operation_id = ?", (operation_id,)
         ).fetchone()
 
-    def reserve_operation(self, contract: WorkContract) -> Reservation:
+    def reserve_operation(
+        self,
+        contract: WorkContract,
+        *,
+        dispatch_kind: str | None = "ordinary",
+    ) -> Reservation:
         """Atomically reserve an operation, or return its existing record.
 
         Reuse is idempotent only when the complete redacted contract matches.
@@ -404,6 +606,9 @@ class SQLiteJournal:
 
         if not isinstance(contract, WorkContract):
             raise TypeError("contract must be a WorkContract")
+        if dispatch_kind is not None and dispatch_kind not in DISPATCH_KINDS:
+            raise ValueError("dispatch_kind is invalid")
+        requested_kind = dispatch_kind or "ordinary"
         persisted = contract.persistence_dict()
         contract_json = canonical_json(persisted)
         contract_sha256 = sha256_text(contract_json)
@@ -417,6 +622,10 @@ class SQLiteJournal:
                     operation_row["task_id"] != contract.task_id
                     or operation_row["prompt_sha256"] != prompt_sha256
                     or operation_row["contract_sha256"] != contract_sha256
+                    or (
+                        dispatch_kind is not None
+                        and operation_row["dispatch_kind"] != dispatch_kind
+                    )
                 ):
                     raise IdempotencyConflict(
                         "operation_id is already reserved for different content"
@@ -450,6 +659,7 @@ class SQLiteJournal:
                 SELECT operation_id FROM operations
                 WHERE task_id = ? AND state IN (
                     'QUEUED', 'STARTING_THREAD', 'READY', 'DISPATCHING',
+                    'QUEUE_DISPATCH_IN_FLIGHT',
                     'RUNNING', 'TURN_COMPLETED', 'VERIFYING', 'TIMED_OUT',
                     'UNKNOWN'
                 )
@@ -465,9 +675,9 @@ class SQLiteJournal:
                     """
                     INSERT INTO operations(
                         operation_id, task_id, prompt_sha256, contract_sha256,
-                        contract_json, state, turn_id, failure_code,
+                        contract_json, dispatch_kind, state, turn_id, failure_code,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
                     """,
                     (
                         contract.operation_id,
@@ -475,6 +685,7 @@ class SQLiteJournal:
                         prompt_sha256,
                         contract_sha256,
                         contract_json,
+                        requested_kind,
                         OperationState.QUEUED.value,
                         now,
                         now,
@@ -496,6 +707,211 @@ class SQLiteJournal:
         return result
 
     reserve = reserve_operation
+
+    def store_continuation_baseline(
+        self, operation_id: str, thread_id: str, turn_ids: tuple[str, ...]
+    ) -> ContinuationBaseline:
+        """Persist the exact pre-dispatch remote turn set once and immutably."""
+
+        validate_external_id(thread_id, "thread_id")
+        if not isinstance(turn_ids, tuple) or len(turn_ids) > 1000:
+            raise JournalError("continuation baseline turn set is invalid or oversized")
+        for turn_id in turn_ids:
+            validate_external_id(turn_id, "turn_id")
+        if len(set(turn_ids)) != len(turn_ids):
+            raise JournalError("continuation baseline contains duplicate turn ids")
+        ordered = tuple(sorted(turn_ids))
+        payload = canonical_json({"turn_ids": list(ordered)})
+        digest = sha256_text(payload)
+        with self._transaction():
+            operation = self._select_operation(operation_id)
+            if operation is None:
+                raise RecordNotFound("operation does not exist")
+            task = self._select_task(operation["task_id"])
+            if task is None or task["thread_id"] != thread_id:
+                raise BindingConflict("continuation thread is not bound to the operation task")
+            existing = self._connection.execute(
+                "SELECT * FROM continuation_baselines WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["thread_id"] != thread_id
+                    or existing["turn_ids_sha256"] != digest
+                    or existing["turn_ids_json"] != payload
+                ):
+                    raise BaselineConflict("continuation baseline is immutable")
+                return self._continuation_baseline_from_row(existing)
+            now = _utc_now()
+            self._connection.execute(
+                """
+                INSERT INTO continuation_baselines(
+                    operation_id, thread_id, turn_ids_sha256, turn_ids_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (operation_id, thread_id, digest, payload, now),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM continuation_baselines WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            assert row is not None
+            return self._continuation_baseline_from_row(row)
+
+    @staticmethod
+    def _continuation_baseline_from_row(row: sqlite3.Row) -> ContinuationBaseline:
+        try:
+            value = json.loads(row["turn_ids_json"])
+            if not isinstance(value, dict) or set(value) != {"turn_ids"}:
+                raise TypeError
+            raw_ids = value["turn_ids"]
+            if not isinstance(raw_ids, list) or len(raw_ids) > 1000:
+                raise TypeError
+            turn_ids = tuple(raw_ids)
+            for turn_id in turn_ids:
+                validate_external_id(turn_id, "turn_id")
+            if len(set(turn_ids)) != len(turn_ids) or turn_ids != tuple(sorted(turn_ids)):
+                raise TypeError
+        except (ContractValidationError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            raise JournalError("continuation baseline is malformed") from exc
+        if canonical_json({"turn_ids": list(turn_ids)}) != row["turn_ids_json"]:
+            raise JournalError("continuation baseline encoding is non-canonical")
+        if sha256_text(row["turn_ids_json"]) != row["turn_ids_sha256"]:
+            raise JournalError("continuation baseline digest mismatch")
+        return ContinuationBaseline(
+            operation_id=row["operation_id"],
+            thread_id=row["thread_id"],
+            turn_ids=turn_ids,
+            turn_ids_sha256=row["turn_ids_sha256"],
+            created_at=row["created_at"],
+        )
+
+    def get_continuation_baseline(self, operation_id: str) -> ContinuationBaseline:
+        with self._lock:
+            self._ensure_open()
+            row = self._connection.execute(
+                "SELECT * FROM continuation_baselines WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("continuation baseline does not exist")
+            return self._continuation_baseline_from_row(row)
+
+    def store_queue_baseline(
+        self,
+        operation_id: str,
+        thread_id: str,
+        message_sha256: str,
+        turn_ids: tuple[str, ...],
+    ) -> QueueBaseline:
+        validate_external_id(thread_id, "thread_id")
+        if len(message_sha256) != 64 or any(c not in "0123456789abcdef" for c in message_sha256):
+            raise JournalError("queue message digest is invalid")
+        if not isinstance(turn_ids, tuple) or len(turn_ids) > 1000:
+            raise JournalError("queue baseline turn set is invalid or oversized")
+        for turn_id in turn_ids:
+            validate_external_id(turn_id, "turn_id")
+        if len(set(turn_ids)) != len(turn_ids):
+            raise JournalError("queue baseline contains duplicate turn ids")
+        ordered = tuple(sorted(turn_ids))
+        payload = canonical_json({"turn_ids": list(ordered)})
+        digest = sha256_text(payload)
+        with self._transaction():
+            operation = self._select_operation(operation_id)
+            if operation is None:
+                raise RecordNotFound("operation does not exist")
+            task = self._select_task(operation["task_id"])
+            if task is None or task["thread_id"] != thread_id:
+                raise BindingConflict("queue thread is not bound to the operation task")
+            existing = self._connection.execute(
+                "SELECT * FROM queue_baselines WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["thread_id"] != thread_id
+                    or existing["message_sha256"] != message_sha256
+                    or existing["turn_ids_sha256"] != digest
+                    or existing["turn_ids_json"] != payload
+                ):
+                    raise BaselineConflict("queue baseline is immutable")
+                return self._queue_baseline_from_row(existing)
+            now = _utc_now()
+            self._connection.execute(
+                """
+                INSERT INTO queue_baselines(
+                    operation_id, thread_id, message_sha256, turn_ids_sha256,
+                    turn_ids_json, submission_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, NULL, ?)
+                """,
+                (operation_id, thread_id, message_sha256, digest, payload, now),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM queue_baselines WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            assert row is not None
+            return self._queue_baseline_from_row(row)
+
+    def bind_queue_submission(self, operation_id: str, submission_id: str) -> QueueBaseline:
+        validate_external_id(submission_id, "submission_id")
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT * FROM queue_baselines WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("queue baseline does not exist")
+            if row["submission_id"] is not None:
+                if row["submission_id"] != submission_id:
+                    raise BindingConflict("operation is already bound to another queue submission")
+                return self._queue_baseline_from_row(row)
+            try:
+                self._connection.execute(
+                    "UPDATE queue_baselines SET submission_id = ? WHERE operation_id = ?",
+                    (submission_id, operation_id),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise BindingConflict("queue submission is already bound") from exc
+            updated = self._connection.execute(
+                "SELECT * FROM queue_baselines WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            assert updated is not None
+            return self._queue_baseline_from_row(updated)
+
+    @staticmethod
+    def _queue_baseline_from_row(row: sqlite3.Row) -> QueueBaseline:
+        try:
+            value = json.loads(row["turn_ids_json"])
+            raw_ids = value["turn_ids"] if isinstance(value, dict) and set(value) == {"turn_ids"} else None
+            if not isinstance(raw_ids, list) or len(raw_ids) > 1000:
+                raise TypeError
+            turn_ids = tuple(raw_ids)
+            for turn_id in turn_ids:
+                validate_external_id(turn_id, "turn_id")
+            if len(set(turn_ids)) != len(turn_ids) or turn_ids != tuple(sorted(turn_ids)):
+                raise TypeError
+        except (ContractValidationError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            raise JournalError("queue baseline is malformed") from exc
+        payload = canonical_json({"turn_ids": list(turn_ids)})
+        if payload != row["turn_ids_json"] or sha256_text(payload) != row["turn_ids_sha256"]:
+            raise JournalError("queue baseline digest mismatch")
+        return QueueBaseline(
+            operation_id=row["operation_id"],
+            thread_id=row["thread_id"],
+            message_sha256=row["message_sha256"],
+            turn_ids=turn_ids,
+            turn_ids_sha256=row["turn_ids_sha256"],
+            submission_id=row["submission_id"],
+            created_at=row["created_at"],
+        )
+
+    def get_queue_baseline(self, operation_id: str) -> QueueBaseline:
+        with self._lock:
+            self._ensure_open()
+            row = self._connection.execute(
+                "SELECT * FROM queue_baselines WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("queue baseline does not exist")
+            return self._queue_baseline_from_row(row)
 
     def get_task(self, task_id: str) -> TaskRecord:
         with self._lock:
@@ -655,6 +1071,7 @@ class SQLiteJournal:
             current = OperationState(row["state"])
             if current not in {
                 OperationState.DISPATCHING,
+                OperationState.QUEUE_DISPATCH_IN_FLIGHT,
                 OperationState.RUNNING,
                 OperationState.UNKNOWN,
                 OperationState.TIMED_OUT,
@@ -828,11 +1245,14 @@ class SQLiteJournal:
     def abandon_unrecoverable(
         self, operation_id: str, receipt: Receipt | Mapping[str, Any]
     ) -> Finalization:
-        """Explicitly close an ambiguous operation that lacks exact IDs.
+        """Explicitly close an open operation that generic recovery cannot resolve.
 
-        This is never called automatically. If both thread and turn identities
-        exist, authoritative recovery is still possible and abandonment is
-        rejected.
+        This is never called automatically. Ordinary operations with exact
+        thread and turn identities must still use authoritative recovery.
+        Queue operations may be closed from any open state because their
+        stronger correlation contract deliberately blocks generic recovery.
+        Continuations may be closed only before authoritative correlation;
+        correlated continuation timeouts must be recovered.
         """
 
         return self._finalize(operation_id, receipt, mode="abandon")
@@ -881,18 +1301,42 @@ class SQLiteJournal:
                             "reconciliation requires exact thread and turn IDs"
                         )
                 else:
-                    if current not in {OperationState.UNKNOWN, OperationState.TIMED_OUT}:
+                    exact_turn = (
+                        task["thread_id"] is not None
+                        and row["turn_id"] is not None
+                    )
+                    ambiguous = current in {
+                        OperationState.UNKNOWN,
+                        OperationState.TIMED_OUT,
+                    }
+                    queue_open = (
+                        row["dispatch_kind"] == "queue"
+                        and (current in ACTIVE_STATES or ambiguous)
+                    )
+                    continuation_unrecoverable = (
+                        row["dispatch_kind"] == "continue"
+                        and current
+                        in {
+                            OperationState.QUEUED,
+                            OperationState.READY,
+                            OperationState.DISPATCHING,
+                            OperationState.UNKNOWN,
+                        }
+                    )
+                    identityless_ambiguity = ambiguous and not exact_turn
+                    if not (
+                        queue_open
+                        or continuation_unrecoverable
+                        or identityless_ambiguity
+                    ):
                         raise InvalidTransition(
-                            "only UNKNOWN or TIMED_OUT can be abandoned"
+                            "operation has an authoritative recovery path or "
+                            "is not open"
                         )
                     if target != OperationState.FAILED or code != (
                         "operator_abandoned_unrecoverable_operation"
                     ):
                         raise InvalidTransition("abandonment receipt has invalid outcome")
-                    if task["thread_id"] is not None and row["turn_id"] is not None:
-                        raise InvalidTransition(
-                            "exact identities exist; recover the operation"
-                        )
 
                 self._require_identity_for_target(row, target)
                 self._connection.execute(
@@ -1045,6 +1489,166 @@ class SQLiteJournal:
                 raise RecordNotFound("receipt does not exist")
             return Receipt.from_json(row["receipt_json"])
 
+    @staticmethod
+    def _watch_from_row(row: sqlite3.Row) -> WatchRecord:
+        return WatchRecord(
+            watch_id=row["watch_id"], thread_id=row["thread_id"], turn_id=row["turn_id"],
+            state=row["state"], result_sha256=row["result_sha256"],
+            failure_code=row["failure_code"], created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _event_from_row(row: sqlite3.Row) -> CompletionEvent:
+        return CompletionEvent(
+            event_id=row["event_id"], watch_id=row["watch_id"],
+            thread_id=row["thread_id"], turn_id=row["turn_id"], status=row["status"],
+            result_sha256=row["result_sha256"], created_at=row["created_at"],
+            acked_at=row["acked_at"],
+        )
+
+    def adopt_watch(self, thread_id: str, turn_id: str) -> WatchRecord:
+        """Idempotently persist an exact read-only thread/turn identity."""
+
+        validate_external_id(thread_id, "thread_id")
+        validate_external_id(turn_id, "turn_id")
+        with self._transaction():
+            existing = self._connection.execute(
+                "SELECT * FROM watches WHERE thread_id = ? AND turn_id = ?",
+                (thread_id, turn_id),
+            ).fetchone()
+            if existing is not None:
+                return self._watch_from_row(existing)
+            now = _utc_now()
+            watch_id = "watch-" + secrets.token_hex(16)
+            self._connection.execute(
+                """
+                INSERT INTO watches(
+                    watch_id, thread_id, turn_id, state, result_sha256,
+                    failure_code, created_at, updated_at
+                ) VALUES (?, ?, ?, 'ACTIVE', NULL, NULL, ?, ?)
+                """,
+                (watch_id, thread_id, turn_id, now, now),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM watches WHERE watch_id = ?", (watch_id,)
+            ).fetchone()
+            assert row is not None
+            return self._watch_from_row(row)
+
+    def get_watch(self, watch_id: str) -> WatchRecord:
+        validate_external_id(watch_id, "watch_id")
+        with self._lock:
+            self._ensure_open()
+            row = self._connection.execute(
+                "SELECT * FROM watches WHERE watch_id = ?", (watch_id,)
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("watch does not exist")
+            return self._watch_from_row(row)
+
+    def list_watches(self, *, active_only: bool = False) -> tuple[WatchRecord, ...]:
+        with self._lock:
+            self._ensure_open()
+            sql = "SELECT * FROM watches"
+            if active_only:
+                sql += " WHERE state = 'ACTIVE'"
+            sql += " ORDER BY created_at, watch_id"
+            return tuple(self._watch_from_row(row) for row in self._connection.execute(sql))
+
+    def finish_watch(
+        self,
+        watch_id: str,
+        status: str,
+        *,
+        result_sha256: str | None = None,
+        failure_code: str | None = None,
+    ) -> tuple[WatchRecord, CompletionEvent]:
+        """Atomically terminalize a watch and insert its single outbox event."""
+
+        validate_external_id(watch_id, "watch_id")
+        if status not in WATCH_TERMINAL_STATES:
+            raise JournalError("watch terminal status is invalid")
+        if result_sha256 is not None and (
+            len(result_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in result_sha256)
+        ):
+            raise JournalError("result_sha256 must be a lowercase SHA-256 digest")
+        code = _failure_code(failure_code)
+        if status == "COMPLETED" and result_sha256 is None:
+            raise JournalError("completed watch requires result_sha256")
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT * FROM watches WHERE watch_id = ?", (watch_id,)
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("watch does not exist")
+            if row["state"] != "ACTIVE" and (
+                row["state"] != status
+                or row["result_sha256"] != result_sha256
+                or row["failure_code"] != code
+            ):
+                raise BindingConflict("watch already has a different terminal result")
+            now = _utc_now()
+            if row["state"] == "ACTIVE":
+                self._connection.execute(
+                    """
+                    UPDATE watches
+                    SET state = ?, result_sha256 = ?, failure_code = ?, updated_at = ?
+                    WHERE watch_id = ?
+                    """,
+                    (status, result_sha256, code, now, watch_id),
+                )
+            event_id = "event-" + sha256_text(
+                f"{watch_id}\0{status}\0{result_sha256 or ''}"
+            )[:32]
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO completion_events(
+                    event_id, watch_id, thread_id, turn_id, status,
+                    result_sha256, created_at, acked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (event_id, watch_id, row["thread_id"], row["turn_id"], status,
+                 result_sha256, now),
+            )
+            watch_row = self._connection.execute(
+                "SELECT * FROM watches WHERE watch_id = ?", (watch_id,)
+            ).fetchone()
+            event_row = self._connection.execute(
+                "SELECT * FROM completion_events WHERE watch_id = ?", (watch_id,)
+            ).fetchone()
+            assert watch_row is not None and event_row is not None
+            return self._watch_from_row(watch_row), self._event_from_row(event_row)
+
+    def list_events(self, *, include_acked: bool = False) -> tuple[CompletionEvent, ...]:
+        with self._lock:
+            self._ensure_open()
+            sql = "SELECT * FROM completion_events"
+            if not include_acked:
+                sql += " WHERE acked_at IS NULL"
+            sql += " ORDER BY created_at, event_id"
+            return tuple(self._event_from_row(row) for row in self._connection.execute(sql))
+
+    def ack_event(self, event_id: str) -> CompletionEvent:
+        validate_external_id(event_id, "event_id")
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT * FROM completion_events WHERE event_id = ?", (event_id,)
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("completion event does not exist")
+            if row["acked_at"] is None:
+                self._connection.execute(
+                    "UPDATE completion_events SET acked_at = ? WHERE event_id = ?",
+                    (_utc_now(), event_id),
+                )
+                row = self._connection.execute(
+                    "SELECT * FROM completion_events WHERE event_id = ?", (event_id,)
+                ).fetchone()
+                assert row is not None
+            return self._event_from_row(row)
+
     def close(self) -> None:
         with self._lock:
             if self._closed:
@@ -1067,6 +1671,7 @@ Journal = SQLiteJournal
 __all__ = [
     "BaselineConflict",
     "BindingConflict",
+    "CompletionEvent",
     "DATABASE_VERSION",
     "Finalization",
     "IdempotencyConflict",
@@ -1081,4 +1686,7 @@ __all__ = [
     "SQLiteJournal",
     "TaskRecord",
     "TaskBusy",
+    "WatchRecord",
+    "WATCH_STATES",
+    "WATCH_TERMINAL_STATES",
 ]

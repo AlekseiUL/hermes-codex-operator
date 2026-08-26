@@ -13,7 +13,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 
 SCHEMA_VERSION = "1"
@@ -43,6 +43,7 @@ class OperationState(StrEnum):
     STARTING_THREAD = "STARTING_THREAD"
     READY = "READY"
     DISPATCHING = "DISPATCHING"
+    QUEUE_DISPATCH_IN_FLIGHT = "QUEUE_DISPATCH_IN_FLIGHT"
     RUNNING = "RUNNING"
     TURN_COMPLETED = "TURN_COMPLETED"
     VERIFYING = "VERIFYING"
@@ -61,6 +62,7 @@ ACTIVE_STATES = frozenset(
         OperationState.STARTING_THREAD,
         OperationState.READY,
         OperationState.DISPATCHING,
+        OperationState.QUEUE_DISPATCH_IN_FLIGHT,
         OperationState.RUNNING,
         OperationState.TURN_COMPLETED,
         OperationState.VERIFYING,
@@ -93,7 +95,10 @@ _NORMAL_TRANSITIONS: dict[OperationState, frozenset[OperationState]] = {
         {OperationState.STARTING_THREAD, OperationState.READY}
     ),
     OperationState.STARTING_THREAD: frozenset({OperationState.READY}),
-    OperationState.READY: frozenset({OperationState.DISPATCHING}),
+    OperationState.READY: frozenset(
+        {OperationState.DISPATCHING, OperationState.QUEUE_DISPATCH_IN_FLIGHT}
+    ),
+    OperationState.QUEUE_DISPATCH_IN_FLIGHT: frozenset({OperationState.RUNNING}),
     OperationState.DISPATCHING: frozenset({OperationState.RUNNING}),
     OperationState.RUNNING: frozenset({OperationState.TURN_COMPLETED}),
     OperationState.TURN_COMPLETED: frozenset({OperationState.VERIFYING}),

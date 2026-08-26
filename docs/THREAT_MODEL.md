@@ -21,12 +21,18 @@
 6. A stale or unrelated thread/turn is mistaken for the requested operation.
 7. Child App Server or verification processes survive cancellation/timeout.
 8. An adapter silently broadens filesystem or network permissions.
+9. A queued operation is later resumed through a different dispatch path.
+10. Remote queue or turn state changes after verification but before success is
+    recorded.
 
 ## Controls
 
 - durable state is written before dispatch;
 - ambiguous dispatch becomes `UNKNOWN` and is never blindly repeated;
 - exact IDs plus prompt digest are required for reconciliation;
+- dispatch kind is reserved atomically and cannot be reinterpreted on recovery;
+- authoritative turn, workspace, result, and queue absence are read again
+  immediately before `VERIFIED`;
 - immutable terminal state and receipt are inserted in one transaction;
 - canonical allowlisted workspace roots;
 - no followed symlinks in MVP;
@@ -43,7 +49,9 @@
 
 Publishing is blocked by any of the following:
 
-- real name, email, username, phone, chat/user ID, or private hostname;
+- unapproved personal name or identity, private email, username, phone,
+  chat/user ID, or private hostname; intentional public author attribution is
+  allowed only when the owner has approved it;
 - absolute user-home path or identifiable machine layout;
 - token, cookie, key, credential path, or private endpoint;
 - private project, team, profile, Wiki, Kanban, or routing name;
@@ -62,3 +70,9 @@ Verification argv is trusted input and runs outside the Codex sandbox with the
 operator user's permissions. `shell=false` prevents shell interpretation, not
 malicious executable behavior; scope snapshots only detect workspace changes
 after execution and do not constrain writes elsewhere.
+
+Workspace snapshots cannot assign causality when another process or turn writes
+concurrently. In particular, experimental active-task `queue` receipts describe
+the combined final workspace window, not per-turn file attribution. Exact turn
+identity and final-state verification remain enforced; causal isolation requires
+an idle task or an externally exclusive workspace.

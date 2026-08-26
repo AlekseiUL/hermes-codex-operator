@@ -20,7 +20,7 @@ import stat
 import sys
 import tarfile
 import tempfile
-from typing import BinaryIO, Iterator, Sequence
+from typing import BinaryIO, IO, Iterator, Sequence
 import unicodedata
 
 
@@ -158,7 +158,7 @@ def _source_snapshot(path: Path) -> Iterator[tuple[BinaryIO, str]]:
 
 
 def _copy_member(
-    source: BinaryIO,
+    source: IO[bytes],
     payloads: BinaryIO,
     expected_size: int,
 ) -> tuple[int, int]:

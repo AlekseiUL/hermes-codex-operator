@@ -55,6 +55,10 @@ class ProtocolIntegrityError(AdapterError):
     """The peer violated an identity, correlation, or message-shape invariant."""
 
 
+class UnsupportedCapability(AdapterError):
+    """An explicitly requested experimental capability is not allowlisted."""
+
+
 class AppServerProcessError(AdapterError):
     def __init__(self, message: str, *, returncode: int | None = None) -> None:
         self.returncode = returncode
@@ -148,8 +152,86 @@ class TurnReadback:
     items: tuple[Mapping[str, Any], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ThreadSummary:
+    thread_id: str
+    cwd: Path
+    preview: str
+    status: str
+    created_at: int
+    updated_at: int
+    turn_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadPage:
+    threads: tuple[ThreadSummary, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogUserMessage:
+    client_message_id: str | None
+    input_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogTurn:
+    turn_id: str
+    status: str
+    final_text: str | None
+    user_messages: tuple[CatalogUserMessage, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadCatalogReadback:
+    thread: ThreadSummary
+    turns: tuple[CatalogTurn, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedSubmission:
+    submission_id: str
+    client_message_id: str
+    input_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class QueuePage:
+    submissions: tuple[QueuedSubmission, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedThreadPage:
+    thread_ids: tuple[str, ...]
+    next_cursor: str | None
+
+
 @runtime_checkable
 class CodexAdapter(Protocol):
+    async def list_threads(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> ThreadPage: ...
+
+    async def read_thread(self, thread_id: str) -> ThreadCatalogReadback: ...
+
+    async def list_loaded_threads(
+        self, *, cursor: str | None = None, limit: int = 100
+    ) -> LoadedThreadPage: ...
+
+    async def list_queue(
+        self, thread_id: str, *, cursor: str | None = None, limit: int = 100
+    ) -> QueuePage: ...
+
+    async def add_queue(
+        self, thread_id: str, prompt: str, client_message_id: str
+    ) -> QueuedSubmission: ...
+
+    async def start_queued_turn(
+        self, thread_id: str, submission_id: str
+    ) -> TurnHandle: ...
+
     async def start_thread(
         self,
         workspace: Path,

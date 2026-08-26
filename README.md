@@ -95,22 +95,23 @@ use a source checkout for the complete Hermes integration shown below.
 
 When Hermes owns the Telegram conversation, no Telegram code is needed in this
 repository: the foreground operator returns a structured result and Hermes
-sends the final message through its existing channel. Crash-independent push
-notifications or watching tasks that were started manually require an external
-durable worker; see the capability table below.
+sends the final message through its existing channel. Completion events for an exact manually started turn are stored durably in a
+transport-neutral local outbox. Delivery remains the host application's job.
 
 ## What is available today
 
-| Capability | v0.0.1 status |
+| Capability | Current source status |
 |---|---|
 | Clarify an idea; propose architecture, options, decomposition, and acceptance criteria | Included in the Hermes skill |
-| Start a new Codex task or continue the same task context | Implemented in the core |
+| Start a new Codex task | Implemented in the core |
+| Continue one exact existing idle task once | Implemented as the explicit `continue` command |
+| Queue one exact active loaded task once | Experimental `queue`; the CLI requires the same already-running managed App Server and exact Codex 0.149.0 |
 | Wait for the exact turn, read it authoritatively, and return the result | Implemented in the core |
 | Verify changed-file scope and argv-only checks | Implemented in the core |
 | Durable status, conservative recovery, immutable receipts | Implemented in the core |
 | Explain the result and send it through Telegram or another Hermes channel | Provided by the host Hermes agent |
 | Add selected research or team artifacts to a brief | Supported as a Hermes workflow; automatic cross-agent crawling is not included |
-| Watch a Codex task that was started manually outside the operator | Roadmap: `adopt` / `watch` |
+| Catalog threads and watch an exact manually started turn | Implemented read-only with durable completion events |
 | Create visible Codex Desktop projects and tasks | Roadmap: optional, version-gated desktop adapter |
 | Background daemon, Kanban, general multi-agent routing, or multi-harness execution | Intentionally not included |
 
@@ -181,8 +182,111 @@ hermes-codex recover --contract work-contract.json --allow-root /absolute/path/t
 hermes-codex collect --contract work-contract.json --allow-root /absolute/path/to/projects --json
 ```
 
+Read-only catalog and exact-ID watch commands never resume or start Codex work:
+
+```bash
+hermes-codex catalog --json
+hermes-codex catalog read THREAD_ID --json
+hermes-codex catalog read THREAD_ID --include-result --json
+hermes-codex adopt THREAD_ID TURN_ID --json
+hermes-codex watch WATCH_ID --json
+hermes-codex events list --json
+hermes-codex events ack EVENT_ID --json
+```
+
+`catalog` is bounded to 20 pages and 1,000 threads. `catalog read` performs an
+exact read-only `thread/read` and exposes turn IDs plus result digests; raw
+result text requires explicit `--include-result`. `adopt` requires both exact
+IDs and verifies them through `thread/read`. Watches survive process restart;
+one terminal watch creates exactly one event containing the result digest, not
+the raw result. Missing, duplicate, or conflicting identity becomes `UNKNOWN`
+without dispatch. Event acknowledgement is idempotent. There is no daemon or
+delivery transport in the package, so callers poll `watch` and consume the
+outbox themselves.
+
 For a follow-up, keep `task_id` and use a new `operation_id`. That resumes the
 same Codex thread. Never reuse an operation ID with different instructions.
+
+To continue a task discovered outside this journal, pin the exact idle thread
+and expected workspace in a private WorkContract, then invoke the distinct
+mutation command once:
+
+```bash
+hermes-codex continue \
+  --contract work-contract.json \
+  --thread-id THREAD_ID \
+  --allow-root /absolute/path/to/projects \
+  --json
+```
+
+`continue` first reserves the operation, reads and verifies the exact idle
+thread/workspace, and persists the complete baseline turn-ID set. Only then may
+it issue one `thread/resume` and one `turn/start`. The returned turn must be the
+only new turn and is bound atomically. A lost, malformed, mismatched, or
+ambiguous resume/start result becomes `UNKNOWN`; repeating the same operation
+returns `dispatched=false` and never submits again. Raw final text is returned
+only by this explicit mutation invocation or the existing explicit `collect`
+and `catalog read --include-result` surfaces.
+
+The shared-queue path is a separate experimental mutation, never a fallback
+from `continue`. A standalone CLI process cannot own an active task from some
+other App Server process. Start Codex's managed App Server explicitly and ensure
+the active task is loaded there:
+
+```bash
+codex app-server daemon start
+```
+
+Then request the exact allowlisted version:
+
+```bash
+hermes-codex queue \
+  --contract work-contract.json \
+  --thread-id THREAD_ID \
+  --shared-app-server \
+  --experimental-api-version 0.149.0 \
+  --allow-root /absolute/path/to/projects \
+  --json
+```
+
+Stable commands initialize App Server with `experimentalApi: false`. The queue
+CLI refuses to run without `--shared-app-server`; that flag reads `socketPath`
+and `appServerVersion` from `codex app-server daemon version`, requires exact
+Codex 0.149.0, and connects directly to `/rpc` on that Unix socket with
+`websockets`. It never accepts an arbitrary transport command.
+`queue` opts into `experimentalApi: true`, proves that the exact active thread
+is loaded in that managed server, verifies its exact `0.149.0` runtime evidence,
+stores the message and baseline-turn digests, and enqueues once. A lost or
+malformed enqueue response gets one bounded queue inspection and no retry;
+zero, multiple, duplicated, or mismatched candidates become `UNKNOWN`. Queue
+disappearance is not completion: the resulting turn must carry the exact queued
+client-message ID and normalized-input digest, followed by authoritative
+completed exact-turn readback. Because completion notifications may be
+connection-local, owner and target completion are proven with bounded exact
+`thread/read` polling; a notification/readback disagreement fails closed. Active
+queues can be consumed automatically by Codex after the owner turn becomes
+terminal; `thread/queue/start` is used only after a bounded readback still shows
+the exact submission queued. Both automatic consumption and the manual fallback
+have synthetic coverage. The current managed-daemon CLI path still requires an
+explicit live qualification on the exact release commit; every other Codex
+version requires separate qualification too.
+
+Generic `recover` and `collect` deliberately cannot promote a stuck queue
+operation to success. Repeating it only observes durable state. The simple
+human escape hatch is `abandon`: it can close any open queue operation and a
+continuation that failed before authoritative turn correlation. It permits a
+later operation, but does not prove that already-dispatched remote work
+stopped. A correlated continuation timeout keeps its authoritative recovery
+path and cannot be abandoned.
+
+Experimental `queue` verification is deliberately end-state evidence, not
+per-turn filesystem attribution. Its workspace baseline is captured while the
+selected owner turn is still active, so receipt `changed_paths` may include
+changes from that owner or another concurrent writer as well as the queued turn.
+The exact queued input, resulting turn, final response, scope, and final checks
+are verified; the receipt does not claim which turn caused each file change. Use
+idle `continue`, or a demonstrably non-mutating owner, when causal isolation is
+required.
 
 For lifecycle commands, JSON `ok` means the operation is `VERIFIED`. `status`
 still exits `0` when it successfully reads a non-verified record, so automation
@@ -216,6 +320,8 @@ stateDiagram-v2
     QUEUED --> STARTING_THREAD
     STARTING_THREAD --> READY
     READY --> DISPATCHING
+    READY --> QUEUE_DISPATCH_IN_FLIGHT: explicit experimental queue
+    QUEUE_DISPATCH_IN_FLIGHT --> RUNNING
     DISPATCHING --> RUNNING
     RUNNING --> TURN_COMPLETED
     TURN_COMPLETED --> VERIFYING
@@ -228,7 +334,6 @@ stateDiagram-v2
     UNKNOWN --> TURN_COMPLETED: recover exact terminal turn
     TIMED_OUT --> RUNNING: recover still-running turn
     TIMED_OUT --> TURN_COMPLETED: recover exact terminal turn
-    UNKNOWN --> FAILED: explicit abandon if identity is missing
     UNKNOWN --> FAILED: recover exact failed turn
     TIMED_OUT --> FAILED: recover exact failed turn
     TIMED_OUT --> CANCELLED: recover interrupted turn
@@ -244,6 +349,10 @@ stateDiagram-v2
 `TURN_COMPLETED` is not the same as `VERIFIED`. A verified receipt binds the
 prompt digest, workspace digest, exact Codex thread and turn, authoritative
 result digest, changed paths, and verification evidence.
+
+Explicit `abandon` is a local-only escape hatch for a stuck queue operation or
+an uncorrelated continuation. It is unavailable when a continuation has an
+exact recoverable turn, and never claims that remote work was cancelled.
 
 The operator is evidence enforcement, not an operating-system sandbox. Codex's
 sandbox remains its execution boundary. Declared verification argv is trusted
@@ -272,7 +381,8 @@ publication.
 
 ## Project status
 
-`v0.0.1` is a pre-alpha clean-room implementation. Its protocol and failure
+The current source tree is a pre-alpha `v0.1.0` release candidate, not a
+published-release claim. Its protocol and failure
 behavior have a comprehensive scripted suite, while live compatibility is
 qualified separately for each Codex CLI, Hermes, Python, and OS combination.
 Unqualified combinations are targets, not support claims. See
@@ -292,7 +402,9 @@ PYTHONPATH=src PYTHONWARNINGS=error::ResourceWarning \
 python3 scripts/privacy_gate.py . --mode tree
 ```
 
-Architecture and protocol details are in [RFC-0001](docs/RFC-0001.md).
+The baseline lifecycle is in [RFC-0001](docs/RFC-0001.md); current observation,
+continuation, and shared-queue semantics are in
+[RFC-0002](docs/RFC-0002.md).
 Contributor setup is in [CONTRIBUTING.md](CONTRIBUTING.md). Independent review
 findings are recorded in [REVIEWS](docs/REVIEWS.md).
 
@@ -331,9 +443,12 @@ Server. Вы формулируете задачу обычным языком. 
 Нужно знать, какой именно запуск выполнился, что он изменил, какие проверки
 реально прошли и не отправилась ли одна задача дважды.
 
-### Что уже работает в v0.0.1
+### Что уже работает в текущем исходном коде
 
 - новый запуск Codex и продолжение того же контекста;
+- отдельная экспериментальная команда `queue` для однократной постановки
+  точной активной задачи через уже запущенный управляемый App Server Codex,
+  с флагом `--shared-app-server` и точным opt-in `0.149.0`;
 - постоянные идентификаторы задачи, операции, потока и запуска;
 - защита от автоматической повторной отправки при неоднозначном результате;
 - точное чтение финального ответа через `thread/read`;
@@ -343,11 +458,19 @@ Server. Вы формулируете задачу обычным языком. 
 - неизменяемый receipt с хешами и результатами проверок;
 - отдельный Hermes skill для подготовки, запуска, контроля и объяснения
   результата.
+- ограниченный каталог потоков, read-only подключение по точным `threadId` и
+  `turnId`, постоянные watches и локальный outbox событий завершения;
+
+Для экспериментальной `queue` список изменённых файлов описывает общее конечное
+состояние за время активной исходной и поставленной в очередь задач. Он не
+доказывает, какой именно запуск изменил каждый файл. Если нужна причинная
+изоляция изменений, используйте `continue` для уже свободной задачи или
+исходный активный запуск, который гарантированно не меняет рабочую папку.
 
 Operator не является фоновым диспетчером, полноценной песочницей или заменой
-человеческой приёмки. Он пока не подхватывает задачи, которые были вручную
-запущены в Codex Desktop, и не создаёт Desktop Projects. Эти возможности
-отделены в [roadmap](docs/ROADMAP.md).
+человеческой приёмки. Он может наблюдать только точный уже известный поток и
+запуск через App Server; Desktop Projects и управление интерфейсом не входят в
+пакет.
 
 ### Быстрый старт
 
@@ -402,6 +525,14 @@ hermes skills list
 `TURN_COMPLETED` ещё не означает `VERIFIED`. Для подтверждённого результата
 Operator связывает хеш промпта, рабочую папку, точный поток и запуск Codex,
 авторитетно перечитанный ответ, список изменений и результаты проверок.
+
+Экспериментальная очередь не запускается через новый отдельный App Server:
+сначала явно запустите `codex app-server daemon start`, а в `hermes-codex queue`
+передайте `--shared-app-server`. Зависшую очередь обычные `recover` и `collect`
+не превращают в успех; явный `abandon` закрывает только локальную операцию и не
+утверждает, что удалённая работа остановилась. Для уже точно связанного
+продолжения сохраняется безопасный `recover`, поэтому такое продолжение нельзя
+закрыть через `abandon`.
 
 Команды проверки выбирает пользователь. Они запускаются от имени текущего
 пользователя операционной системы и могут иметь побочные эффекты. Используйте

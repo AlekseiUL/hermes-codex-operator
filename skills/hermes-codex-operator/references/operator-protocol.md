@@ -80,12 +80,77 @@ content is an idempotency conflict.
 - `FAILED` or `CANCELLED`: report the recorded failure and evidence without
   converting it into a success narrative.
 
+## Existing idle task continuation
+
+`continue` is a distinct mutation, not a catalog/watch mode. It requires an
+exact `thread_id`, a private WorkContract whose workspace exactly matches the
+authoritative idle thread, and a fresh operation ID. The journal reserves that
+operation and stores the bounded exact baseline turn-ID set before issuing one
+`thread/resume` followed by one `turn/start`. The returned turn ID must be the
+only addition to the authoritative set.
+
+Any lost, malformed, mismatched, or ambiguous resume/start delivery is
+`UNKNOWN`. Repeating the same operation observes durable state with
+`dispatched=false`; it never retries. Only the exact bound turn may be waited
+for, read, verified, collected, or reconciled. Project inference, queues, and
+Desktop UI automation are not part of this protocol.
+
+## Experimental active-task shared queue
+
+`queue` is a separate opt-in mutation for a proven active loaded thread. It is
+not a retry or fallback from `continue` and currently accepts only
+`--experimental-api-version 0.149.0`. Stable adapter usage remains
+`experimentalApi: false`; unsupported or omitted versions fail before queue
+side effects, and initialized App Server runtime evidence must report the same
+exact version.
+
+The public CLI additionally requires `--shared-app-server`. The user must
+explicitly start Codex's managed App Server first; the active owner and the
+queue client must use that same server. The flag selects the fixed
+daemon discovered through read-only `codex app-server daemon version`, checks
+its exact version, and connects directly to `/rpc` on the returned Unix socket.
+A fresh App Server process cannot satisfy ownership for another session's active task.
+
+Before enqueue, the operator proves one exact loaded owner plus one active turn,
+binds the thread/workspace, and stores the contract-message hash and complete
+baseline turn-set digest. It then persists `QUEUE_DISPATCH_IN_FLIGHT`, enqueues
+once, and atomically binds the exact submission ID. A lost or malformed enqueue
+response permits one queue inspection for one exact durable match, never a
+second enqueue. Zero, multiple, duplicate, or mismatched matches are `UNKNOWN`.
+
+Queue disappearance is not success. After the active owner turn becomes
+terminal, the operator first performs bounded authoritative reads because Codex
+0.149.0 can consume the queued submission automatically. `thread/queue/start`
+is only a fallback while the exact submission remains queued. The resulting
+turn must contain the exact queued client-message ID and normalized-input
+digest before binding, then reach completed authoritative readback with a final
+result before verification.
+Repeat or restart only observes durable state with `dispatched=false`. The
+managed-daemon CLI path has synthetic coverage and must pass the explicit live
+smoke on the exact release commit; other versions need separate qualification
+and approval.
+
+For any stuck queue state, generic `recover` and `collect` only observe durable
+state; they cannot reclassify the bound turn as successful. A human may
+explicitly run `abandon` to close the local operation and allow a later one.
+That action is not evidence that a queued or running remote turn was cancelled.
+
+`queue` proves the exact queued message, resulting turn, completed result, and
+declared final workspace checks. It does not provide per-turn filesystem
+attribution: the workspace baseline predates completion of the active owner, so
+receipt `changed_paths` cover the combined owner-plus-queued interval. Select
+idle `continue` instead when the user needs proof that each changed path came
+from only the requested follow-up turn.
+
 An unsupported server approval request fails closed instead of silently
 broadening permissions. A future interactive approval adapter requires a new
 protocol version rather than an unused v1 state.
 
-`abandon` is a deliberate human closure for an identity-less ambiguity. It is
-not an automatic retry mechanism.
+`abandon` is a deliberate human closure for an identity-less ordinary
+ambiguity, any open queue operation, or a continuation that failed before
+authoritative turn correlation. A correlated continuation timeout must be
+recovered. Abandonment is not an automatic retry or remote-cancellation
+mechanism.
 
 ## User-facing completion message
 

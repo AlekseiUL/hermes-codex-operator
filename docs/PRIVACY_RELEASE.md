@@ -106,10 +106,10 @@ python3 -m pip install build==1.5.0
 mkdir -p dist/raw
 python3 -m build --sdist --wheel --outdir dist/raw
 python3 scripts/normalize_sdist.py \
-  dist/raw/hermes_codex_operator-0.0.1.tar.gz \
-  --expected-root hermes_codex_operator-0.0.1 \
-  --output dist/hermes_codex_operator-0.0.1.tar.gz
-cp dist/raw/hermes_codex_operator-0.0.1-py3-none-any.whl dist/
+  dist/raw/hermes_codex_operator-0.1.0.tar.gz \
+  --expected-root hermes_codex_operator-0.1.0 \
+  --output dist/hermes_codex_operator-0.1.0.tar.gz
+cp dist/raw/hermes_codex_operator-0.1.0-py3-none-any.whl dist/
 ```
 
 Some sdist builders preserve the local account name in tar owner fields. The
@@ -127,8 +127,8 @@ unapproved binary entries, and decompression-size limits fail closed:
 
 ```bash
 python3 scripts/privacy_gate.py . --mode release \
-  --archive dist/hermes_codex_operator-0.0.1.tar.gz \
-  --archive dist/hermes_codex_operator-0.0.1-py3-none-any.whl \
+  --archive dist/hermes_codex_operator-0.1.0.tar.gz \
+  --archive dist/hermes_codex_operator-0.1.0-py3-none-any.whl \
   --denylist "$PRIVATE_CONFIG_DIR/hermes-codex-operator-private-markers.txt"
 ```
 

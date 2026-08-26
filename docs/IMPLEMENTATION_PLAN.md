@@ -68,6 +68,47 @@ commands plus a small JSON mapping guide for Hermes.
 **Check:** CLI output is stable JSON on stdout; diagnostics go to stderr.
 **Result:** Thin interface usable by Hermes without a Telegram implementation.
 
+### Step 6a: Continue one exact existing idle task once
+
+**What:** Add a separate `continue` service/command with exact thread and
+workspace preflight, immutable baseline turn IDs, at-most-once resume/start,
+atomic returned-turn binding, exact correlation/readback, and no automatic
+retry from ambiguity.
+**Files:** `src/hermes_codex_operator/continuation.py`,
+`src/hermes_codex_operator/journal.py`, `src/hermes_codex_operator/cli.py`,
+`tests/test_continuation.py`
+**Commands:** `python3 -m unittest tests.test_continuation -v`
+**Check:** idle happy path, duplicate/restart, identity mismatch, malformed or
+oversized baselines, lost/malformed delivery, multiple-turn correlation,
+terminal failure, migration, and two-process contention are covered with
+synthetic fixtures only.
+**Result:** One bounded continuation mutation; catalog/read/adopt/watch/events
+remain strictly read-only, and project/queue/Desktop APIs remain excluded from
+this stable continuation path.
+
+### Step 6b: Queue one exact active task through an experimental shared queue
+
+**What:** Add a separate exact-version opt-in `queue` command with loaded/active
+ownership proof in one managed App Server, immutable queue baseline, one
+enqueue, one bounded recovery inspection, exact submission/turn binding, and
+authoritative completion. The public CLI uses only the managed daemon's
+version-qualified direct Unix-socket `/rpc` transport.
+**Files:** `src/hermes_codex_operator/queueing.py`,
+`src/hermes_codex_operator/adapters/app_server.py`,
+`src/hermes_codex_operator/journal.py`, `src/hermes_codex_operator/cli.py`,
+`tests/test_queueing.py`, `tests/test_app_server_protocol.py`
+**Commands:** `python3 -m unittest tests.test_queueing tests.test_app_server_protocol -v`;
+`python3 scripts/live_queue_smoke.py --confirm-live-codex`
+**Check:** exact opt-in, unsupported versions, ownership ambiguity, contention,
+lost/malformed enqueue recovery, duplicate/mismatched identity, baseline bounds,
+turn correlation, exact readback, and repeat/restart behavior are covered.
+**Result:** One experimental 0.149.0 queue mutation; stable adapter remains
+`experimentalApi: false`, and queue never becomes continuation fallback.
+Synthetic tests cover automatic consumption and manual start. The earlier live
+smoke used one injected adapter and did not qualify the public managed-daemon
+proxy CLI or distinguish which consumption branch ran; the rewritten CLI smoke
+must run on the exact release commit.
+
 ### Step 7: Add privacy and release gates
 
 **What:** Scan source, staged Git state, reachable history, generated source

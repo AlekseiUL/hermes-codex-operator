@@ -25,8 +25,9 @@ These are the selected public repository values.
 ## Social preview
 
 Use `docs/assets/hermes-codex-operator-hero.png`. The image contains no product
-logos, personal data, screenshots, or embedded text, so GitHub can crop it
-without making the brand name unreadable.
+logos, personal data, screenshots, or visible text, so GitHub can crop it
+without making the brand name unreadable. Standard image-provenance metadata is
+not treated as user content.
 
 ## Repository settings
 
@@ -40,10 +41,10 @@ without making the brand name unreadable.
 - allow only actions pinned to a full commit SHA;
 - disable unused GitHub features until there is an owner for them.
 
-## First public release
+## Next public release
 
-1. Create the first reviewed commit.
+1. Finalize the exact reviewed `v0.1.0` candidate commit.
 2. Run tests, package smoke, live Codex smoke, clean Hermes smoke, and every
    privacy mode against that exact commit, sdist, and wheel.
 3. Have an independent reviewer inspect the tree, history, and release archive.
-4. Publish the already-scanned commit and tag it `v0.0.1`.
+4. Publish the already-scanned commit and tag it `v0.1.0`.
