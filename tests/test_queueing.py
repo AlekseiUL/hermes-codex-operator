@@ -13,6 +13,7 @@ from hermes_codex_operator.adapters.base import (
     ProtocolIntegrityError,
     QueuedSubmission,
     ThreadCatalogReadback,
+    TurnHandle,
     ThreadSummary,
     UnsupportedCapability,
 )
@@ -161,6 +162,20 @@ class QueueContinuationOperatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(backend.queue_list_calls, 1)
                 self.assertEqual(backend.queue_start_calls, 1)
 
+    async def test_malformed_start_response_recovers_one_unique_turn_once(self) -> None:
+        backend = self.backend(fail_at="queue_start_malformed")
+        contract = queue_contract(self.workspace, "queue-start-malformed")
+
+        outcome = await self.operator(backend).continue_active(
+            contract, thread_id=self.thread_id
+        )
+
+        self.assertEqual(outcome.operation.state, OperationState.VERIFIED)
+        self.assertTrue(outcome.dispatched)
+        self.assertEqual(backend.queue_add_calls, 1)
+        self.assertEqual(backend.queue_start_calls, 1)
+        self.assertEqual(backend.read_turn_calls, 1)
+
     async def test_lost_enqueue_zero_or_multiple_matches_is_unknown_without_reenqueue(self) -> None:
         for mode in ("zero", "multiple"):
             with self.subTest(mode=mode):
@@ -233,10 +248,98 @@ class QueueContinuationOperatorTests(unittest.IsolatedAsyncioTestCase):
             queue_contract(self.workspace), thread_id=self.thread_id
         )
         self.assertEqual(outcome.operation.state, OperationState.UNKNOWN)
-        self.assertEqual(outcome.operation.failure_code, "queue_enqueue_unconfirmed")
+        self.assertEqual(
+            outcome.operation.failure_code, "queue_enqueue_identity_conflict"
+        )
         self.assertEqual(backend.queue_add_calls, 1)
-        self.assertEqual(backend.queue_list_calls, 1)
+        self.assertEqual(backend.queue_list_calls, 0)
         self.assertEqual(backend.queue_start_calls, 0)
+
+    async def test_explicit_enqueue_identity_conflict_ignores_exact_durable_match(self) -> None:
+        backend = self.backend()
+        contract = queue_contract(self.workspace, "queue-explicit-add-conflict")
+
+        class ContradictoryAddAdapter(FakeCodexAdapter):
+            async def add_queue(self, thread_id, prompt, client_message_id):
+                self.backend.queue_add_calls += 1
+                digest = QueueContinuationOperator._input_digest(prompt)
+                self.backend.queued[thread_id] = [
+                    QueuedSubmission("submission-exact", client_message_id, digest)
+                ]
+                return QueuedSubmission(
+                    "submission-response-conflict", "client-conflict", digest
+                )
+
+        first = await self.operator(backend, ContradictoryAddAdapter).continue_active(
+            contract, thread_id=self.thread_id
+        )
+        repeat = await self.operator(backend, ContradictoryAddAdapter).continue_active(
+            contract, thread_id=self.thread_id
+        )
+        reopened = SQLiteJournal(self.database)
+        try:
+            restarted = await self.operator(
+                backend, ContradictoryAddAdapter, journal=reopened
+            ).continue_active(contract, thread_id=self.thread_id)
+        finally:
+            reopened.close()
+
+        self.assertEqual(first.operation.state, OperationState.UNKNOWN)
+        self.assertEqual(
+            first.operation.failure_code, "queue_enqueue_identity_conflict"
+        )
+        self.assertTrue(first.dispatched)
+        self.assertFalse(repeat.dispatched)
+        self.assertFalse(restarted.dispatched)
+        self.assertEqual(backend.queue_add_calls, 1)
+        self.assertEqual(backend.queue_list_calls, 0)
+        self.assertEqual(backend.queue_start_calls, 0)
+        self.assertEqual(backend.read_turn_calls, 0)
+
+    async def test_explicit_start_identity_conflict_is_not_recovered_from_readback(self) -> None:
+        for mode in ("thread", "turn"):
+            with self.subTest(mode=mode):
+                database = self.root / f"start-identity-{mode}.sqlite3"
+                journal = SQLiteJournal(database)
+                backend = self.backend()
+                contract = queue_contract(
+                    self.workspace, f"queue-explicit-start-{mode}-conflict"
+                )
+
+                class ContradictoryStartAdapter(FakeCodexAdapter):
+                    async def start_queued_turn(self, thread_id, submission_id):
+                        actual = await super().start_queued_turn(thread_id, submission_id)
+                        if mode == "thread":
+                            return TurnHandle("thread-response-conflict", actual.turn_id)
+                        return TurnHandle(actual.thread_id, "turn-response-conflict")
+
+                try:
+                    first = await self.operator(
+                        backend, ContradictoryStartAdapter, journal=journal
+                    ).continue_active(contract, thread_id=self.thread_id)
+                    repeat = await self.operator(
+                        backend, ContradictoryStartAdapter, journal=journal
+                    ).continue_active(contract, thread_id=self.thread_id)
+                finally:
+                    journal.close()
+                reopened = SQLiteJournal(database)
+                try:
+                    restarted = await self.operator(
+                        backend, ContradictoryStartAdapter, journal=reopened
+                    ).continue_active(contract, thread_id=self.thread_id)
+                finally:
+                    reopened.close()
+
+                self.assertEqual(first.operation.state, OperationState.UNKNOWN)
+                self.assertEqual(
+                    first.operation.failure_code, "queue_turn_identity_conflict"
+                )
+                self.assertTrue(first.dispatched)
+                self.assertFalse(repeat.dispatched)
+                self.assertFalse(restarted.dispatched)
+                self.assertEqual(backend.queue_add_calls, 1)
+                self.assertEqual(backend.queue_start_calls, 1)
+                self.assertEqual(backend.read_turn_calls, 0)
 
     async def test_queue_disappearance_without_new_turn_is_not_success(self) -> None:
         backend = self.backend()

@@ -18,7 +18,10 @@ from hermes_codex_operator.adapters import (
     TurnInProgress,
     UnsupportedCapability,
 )
-from hermes_codex_operator.adapters.app_server import EXPERIMENTAL_QUEUE_API_VERSION
+from hermes_codex_operator.adapters.app_server import (
+    EXPERIMENTAL_QUEUE_API_VERSION,
+    QueueIdentityConflict,
+)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_app_server.py"
@@ -149,6 +152,42 @@ class AppServerProtocolTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(turn.turn_id, TURN_ID)
         finally:
             await adapter.close()
+
+    async def test_queue_add_explicit_identity_conflict_is_distinct_from_malformed(self) -> None:
+        for mode in ("client", "input"):
+            with self.subTest(mode=mode):
+                class ContradictoryQueueAdapter(AppServerAdapter):
+                    async def _ensure_started(self) -> None:
+                        return None
+
+                    async def _request(self, method, params, *, side_effect):
+                        queued_input = params["input"]
+                        if mode == "input":
+                            queued_input = [{"type": "text", "text": "Different input."}]
+                        return {
+                            "queuedSubmission": {
+                                "id": "submission-response-conflict",
+                                "clientUserMessageId": (
+                                    "client-response-conflict"
+                                    if mode == "client"
+                                    else params["clientUserMessageId"]
+                                ),
+                                "input": queued_input,
+                            }
+                        }
+
+                adapter = ContradictoryQueueAdapter(
+                    experimental_api_version=EXPERIMENTAL_QUEUE_API_VERSION
+                )
+                try:
+                    with self.assertRaises(QueueIdentityConflict):
+                        await adapter.add_queue(
+                            THREAD_ID,
+                            "Synthetic queued input.",
+                            "client-synthetic-001",
+                        )
+                finally:
+                    await adapter.close()
 
     async def test_stable_adapter_rejects_queue_without_starting_transport(self) -> None:
         adapter = self.adapter("queue_protocol")

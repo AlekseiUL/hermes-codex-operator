@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from .adapters.app_server import EXPERIMENTAL_QUEUE_API_VERSION
+from .adapters.app_server import (
+    EXPERIMENTAL_QUEUE_API_VERSION,
+    QueueIdentityConflict,
+)
 from .adapters.base import (
     AdapterError,
     AdapterTimeout,
@@ -107,8 +110,12 @@ class QueueContinuationOperator(Operator):
                     submission = await adapter.add_queue(
                         expected_thread, contract.prompt, client_message_id
                     )
-                    self._validate_submission(
-                        submission, client_message_id, input_digest
+                except QueueIdentityConflict:
+                    return self._terminal_outcome(
+                        contract,
+                        OperationState.UNKNOWN,
+                        "queue_enqueue_identity_conflict",
+                        dispatched=True,
                     )
                 except (AdapterError, KeyError, ValueError):
                     await adapter.close()
@@ -134,6 +141,18 @@ class QueueContinuationOperator(Operator):
                             "queue_enqueue_unconfirmed",
                             dispatched=True,
                         )
+                else:
+                    try:
+                        self._validate_submission(
+                            submission, client_message_id, input_digest
+                        )
+                    except (ProtocolIntegrityError, KeyError, ValueError):
+                        return self._terminal_outcome(
+                            contract,
+                            OperationState.UNKNOWN,
+                            "queue_enqueue_identity_conflict",
+                            dispatched=True,
+                        )
 
                 try:
                     queue_baseline = self.journal.bind_queue_submission(
@@ -152,18 +171,6 @@ class QueueContinuationOperator(Operator):
                     turn = await adapter.start_queued_turn(
                         expected_thread, queue_baseline.submission_id
                     )
-                    if turn.thread_id != expected_thread:
-                        raise ProtocolIntegrityError(
-                            "thread/queue/start returned a different thread"
-                        )
-                    correlated = await adapter.read_thread(expected_thread)
-                    turn_id = self._unique_new_turn(
-                        correlated.thread.turn_ids, baseline_ids
-                    )
-                    if turn.turn_id != turn_id:
-                        raise ProtocolIntegrityError(
-                            "thread/queue/start returned an uncorrelated turn"
-                        )
                 except (AdapterError, KeyError, ValueError):
                     await adapter.close()
                     adapter = self.adapter_factory()
@@ -177,6 +184,41 @@ class QueueContinuationOperator(Operator):
                             contract,
                             OperationState.UNKNOWN,
                             "queue_turn_correlation_unknown",
+                            dispatched=True,
+                        )
+                else:
+                    if turn.thread_id != expected_thread:
+                        return self._terminal_outcome(
+                            contract,
+                            OperationState.UNKNOWN,
+                            "queue_turn_identity_conflict",
+                            dispatched=True,
+                        )
+                    try:
+                        correlated = await adapter.read_thread(expected_thread)
+                        turn_id = self._unique_new_turn(
+                            correlated.thread.turn_ids, baseline_ids
+                        )
+                    except (AdapterError, KeyError, ValueError):
+                        await adapter.close()
+                        adapter = self.adapter_factory()
+                        try:
+                            correlated = await adapter.read_thread(expected_thread)
+                            turn_id = self._unique_new_turn(
+                                correlated.thread.turn_ids, baseline_ids
+                            )
+                        except (AdapterError, KeyError, ValueError):
+                            return self._terminal_outcome(
+                                contract,
+                                OperationState.UNKNOWN,
+                                "queue_turn_correlation_unknown",
+                                dispatched=True,
+                            )
+                    if turn.turn_id != turn_id:
+                        return self._terminal_outcome(
+                            contract,
+                            OperationState.UNKNOWN,
+                            "queue_turn_identity_conflict",
                             dispatched=True,
                         )
 

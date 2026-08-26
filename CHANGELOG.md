@@ -25,6 +25,9 @@ All notable changes to this project will be documented here. The format follows
 - Stable commands keep experimental capabilities disabled. Queue opt-in is
   exact-version only; lost/malformed enqueue delivery gets one inspection and
   never re-enqueues, while ambiguous identity or turn correlation is `UNKNOWN`.
+- Explicit queue add/start response identity contradictions now fail closed as
+  `UNKNOWN` and cannot be recovered through a different matching queue item or
+  unique readback turn.
 - No raw prompt or result was added to continuation or queue journal rows.
 
 ## [0.1.0] - 2026-08-26

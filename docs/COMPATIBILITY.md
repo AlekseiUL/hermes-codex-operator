@@ -56,9 +56,12 @@ catalog, and watch. It requires exact loaded-thread and active-turn ownership,
 persists an immutable SQLite v4 queue baseline before dispatch, enqueues once,
 and never treats a lost response or restart as permission to enqueue again.
 Queue inspection is bounded to one page after malformed/lost enqueue delivery;
-completion requires unique new-turn correlation and authoritative exact-turn
-readback. It has synthetic protocol/failure qualification only; no live
-mutating queue smoke has been authorized or run.
+an explicit successful-response client, submission, thread, or turn identity
+contradiction fails closed immediately and cannot be replaced by an otherwise
+matching queue/readback candidate. Completion requires unique new-turn
+correlation and authoritative exact-turn readback. It has synthetic
+protocol/failure qualification only; no live mutating queue smoke has been
+authorized or run.
 
 The official App Server documentation states that stdio uses newline-delimited
 JSON, requires the initialization handshake, and models conversation as

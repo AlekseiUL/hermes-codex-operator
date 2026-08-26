@@ -49,6 +49,10 @@ _SANDBOX_TYPES = {
 EXPERIMENTAL_QUEUE_API_VERSION = "0.149.0"
 
 
+class QueueIdentityConflict(ProtocolIntegrityError):
+    """A successful queue response contradicted the requested identity."""
+
+
 @dataclass(slots=True)
 class _PendingRequest:
     request_id: int
@@ -329,12 +333,14 @@ class AppServerAdapter:
         queued = self._result_object(result, "thread/queue/add", "queuedSubmission")
         submission = self._parse_queued_submission(queued)
         if submission.client_message_id != client_id:
-            raise ProtocolIntegrityError("thread/queue/add changed client message identity")
+            raise QueueIdentityConflict(
+                "thread/queue/add changed client message identity"
+            )
         expected_digest = sha256_text(
             canonical_json({"input": [{"text": text, "type": "text"}]})
         )
         if submission.input_sha256 != expected_digest:
-            raise ProtocolIntegrityError("thread/queue/add changed queued input")
+            raise QueueIdentityConflict("thread/queue/add changed queued input")
         return submission
 
     async def start_queued_turn(
