@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 import threading
-from typing import Callable, cast
+from typing import Awaitable, Callable, cast
 
 from .adapters.base import (
     AdapterError,
@@ -109,7 +109,7 @@ class Operator:
         except RecordNotFound:
             raise RecordNotFound("cannot recover an operation that was never reserved")
         # Re-run the full idempotency comparison without creating a new record.
-        reservation = self.journal.reserve_operation(contract)
+        self.journal.reserve_operation(contract)
         with self.journal.operation_guard(contract.operation_id) as owned:
             if not owned:
                 return self._observe_existing(contract)
@@ -194,6 +194,16 @@ class Operator:
         allow_dispatch: bool = True,
         recover_ambiguous: bool = False,
     ) -> OperatorOutcome:
+        try:
+            self.journal.get_queue_baseline(contract.operation_id)
+        except RecordNotFound:
+            pass
+        else:
+            # Queue correlation has stronger identity requirements than the
+            # generic submit/recover path. Never let a generic lifecycle
+            # command reinterpret an ambiguous queued turn as verified.
+            return self._observe_existing(contract)
+
         if recover_ambiguous and operation.state in {
             OperationState.UNKNOWN,
             OperationState.TIMED_OUT,
@@ -493,12 +503,24 @@ class Operator:
         baseline: WorkspaceSnapshot,
         final_text: str | None,
         dispatched: bool,
+        *,
+        before_verified: Callable[[], Awaitable[None]] | None = None,
+        before_verified_failure_code: str = "authoritative_evidence_changed",
     ) -> OperatorOutcome:
         try:
             codex_snapshot = await asyncio.to_thread(
                 snapshot_workspace, Path(contract.workspace), self.workspace_policy
             )
             codex_paths = changed_paths(baseline, codex_snapshot)
+        except WorkspaceError:
+            return self._terminal_outcome(
+                contract,
+                OperationState.FAILED,
+                "workspace_evidence_failed",
+                dispatched=dispatched,
+            )
+
+        try:
             current = self.journal.get_operation(contract.operation_id)
             if current.state == OperationState.TURN_COMPLETED:
                 self.journal.transition(contract.operation_id, OperationState.VERIFYING)
@@ -512,13 +534,6 @@ class Operator:
                 (),
                 final_text,
                 dispatched,
-            )
-        except WorkspaceError:
-            return self._terminal_outcome(
-                contract,
-                OperationState.FAILED,
-                "workspace_evidence_failed",
-                dispatched=dispatched,
             )
 
         cancel_event = threading.Event()
@@ -618,6 +633,16 @@ class Operator:
             state = OperationState.VERIFICATION_FAILED
             failure_code = failed.failure_code or "verification_failed"
         else:
+            if before_verified is not None:
+                try:
+                    await before_verified()
+                except (AdapterError, KeyError, ValueError):
+                    return self._terminal_outcome(
+                        contract,
+                        OperationState.UNKNOWN,
+                        before_verified_failure_code,
+                        dispatched=dispatched,
+                    )
             state = OperationState.VERIFIED
             failure_code = None
         return self._finalize_outcome(

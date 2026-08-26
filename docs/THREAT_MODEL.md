@@ -62,3 +62,9 @@ Verification argv is trusted input and runs outside the Codex sandbox with the
 operator user's permissions. `shell=false` prevents shell interpretation, not
 malicious executable behavior; scope snapshots only detect workspace changes
 after execution and do not constrain writes elsewhere.
+
+Workspace snapshots cannot assign causality when another process or turn writes
+concurrently. In particular, experimental active-task `queue` receipts describe
+the combined final workspace window, not per-turn file attribution. Exact turn
+identity and final-state verification remain enforced; causal isolation requires
+an idle task or an externally exclusive workspace.

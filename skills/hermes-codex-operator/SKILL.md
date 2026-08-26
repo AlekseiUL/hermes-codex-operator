@@ -48,12 +48,15 @@ proves the expected workspace and `idle` state. Use a fresh operation ID and
 invoke it once. Repeating or recovering that operation must remain
 `dispatched=false`; an ambiguous resume/start is `UNKNOWN`, never a retry.
 
-Use `hermes-codex queue` only for an exact active Desktop-owned thread when the
-user explicitly selects the experimental shared queue and supplies the exact
-qualified API version `0.149.0`. This is not a retry or fallback from
-`continue`. Missing/ambiguous ownership, queue identity, resulting-turn
-correlation, or exact completed readback stops as `BUSY_UNKNOWN` or `UNKNOWN`;
-repeat/restart never enqueues again. Requalify before using another version.
+Use `hermes-codex queue` only for an exact active thread proven loaded in the
+same qualified App Server session when the user explicitly selects the
+experimental shared queue and supplies the exact API version `0.149.0`. This is
+not a retry or fallback from `continue`. Missing/ambiguous ownership, queue
+identity, resulting-turn correlation, or exact completed readback stops as
+`BUSY_UNKNOWN` or `UNKNOWN`; repeat/restart never enqueues again. Requalify
+before using another version. Treat queue `changed_paths` as combined end-state
+evidence across the active owner and queued turn, not per-turn causality; use
+idle `continue` when the user needs isolated file attribution.
 
 ## Return the result
 

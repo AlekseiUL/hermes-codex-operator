@@ -36,16 +36,17 @@ only an explicit exact `--experimental-api-version 0.149.0`, initializes with
 report the exact selected version before any queue side effect.
 Unknown server requests and permission broadening fail closed.
 
-`project/list` is deliberately excluded from v0.1.0. Catalog/read/adopt/watch do
+`project/list` is deliberately excluded from the current source. Catalog/read/adopt/watch do
 not call `thread/resume`, `thread/start`, or `turn/start`; they use only
-`thread/list` and authoritative `thread/read`. The release slice has both
-synthetic protocol coverage and a bounded read-only live smoke proving that
-catalog/read/adopt leaves the exact turn set unchanged.
+`thread/list` and authoritative `thread/read`. This read-only surface has
+synthetic protocol coverage; a reproducible live catalog/read/adopt
+qualification has not yet been recorded.
 
-The explicit `continue` command is the only new mutation surface in the current
-unreleased slice. It requires exact `thread/read` workspace and idle-state
-proof, stores a bounded immutable turn-ID baseline, then allows exactly one
-`thread/resume` and one `turn/start`. It does not use project or queue APIs.
+The explicit `continue` command is the stable continuation mutation in the
+current source. It requires exact `thread/read` workspace and idle-state proof,
+stores a bounded immutable turn-ID baseline, then allows exactly one
+`thread/resume` and one `turn/start`. It does not use project or queue APIs; the
+separate exact-version `queue` command is an experimental mutation.
 `thread/resume` is treated as delivery-affecting for timeout/cancellation
 purposes: an unconfirmed response is `UNKNOWN` and is never auto-resubmitted.
 This path currently has synthetic protocol/failure qualification only; no live
@@ -58,10 +59,20 @@ and never treats a lost response or restart as permission to enqueue again.
 Queue inspection is bounded to one page after malformed/lost enqueue delivery;
 an explicit successful-response client, submission, thread, or turn identity
 contradiction fails closed immediately and cannot be replaced by an otherwise
-matching queue/readback candidate. Completion requires unique new-turn
-correlation and authoritative exact-turn readback. It has synthetic
-protocol/failure qualification only; no live mutating queue smoke has been
-authorized or run.
+matching queue/readback candidate. Completion requires a resulting turn whose
+user message matches both the exact queued client ID and normalized-input
+digest, plus authoritative exact-turn readback. Codex 0.149.0 normalizes
+queued text inputs with an empty `text_elements` array and automatically
+consumes an active thread's queued submission shortly after the owner turn
+becomes terminal. The operator polls that authoritative transition before using
+`thread/queue/start` as a bounded fallback. A live mutating queue smoke passed
+on the qualified macOS host, including duplicate and restart non-dispatch.
+
+This experimental path has end-state workspace semantics. Because its baseline
+is captured before the active owner finishes, receipt `changed_paths` cover the
+combined owner-plus-queued window and cannot attribute every file to one turn.
+Exact queued input/turn/result identity and final verification are enforced.
+Use idle `continue` when per-turn filesystem attribution is required.
 
 The official App Server documentation states that stdio uses newline-delimited
 JSON, requires the initialization handshake, and models conversation as
@@ -87,15 +98,22 @@ For every newly supported Codex CLI version:
 3. compare the methods and fields used by the adapter;
 4. run the complete scripted protocol/failure suite;
 5. run the disposable live smoke from `scripts/live_smoke.py`;
-6. repeat the same operation ID and prove `dispatched=false`;
-7. record the result in the table below.
+6. for the experimental queue, run `scripts/live_queue_smoke.py`;
+7. repeat the same operation ID and prove `dispatched=false`;
+8. record the result in the table below.
 
 The live command is explicit because it uses the caller's authenticated Codex
 installation and may leave a synthetic thread in local history:
 
 ```bash
 python3 scripts/live_smoke.py --confirm-live-codex
+python3 scripts/live_queue_smoke.py --confirm-live-codex --owner-attempts 3
 ```
+
+The bounded owner-attempt option applies only before `queue/add`. Interrupted
+synthetic owner turns are reported in the JSON receipt and never count as queue
+evidence; after one owner reaches authoritative `active/inProgress`, the smoke
+allows at most one queue submission.
 
 Do not silently widen enums or ignore unexpected response fields merely to make
 a newer version pass.
@@ -106,6 +124,7 @@ a newer version pass.
 |---|---|---|---|---|---|
 | 2026-08-25 | macOS 26.5 arm64 | 0.124.0 | — | BLOCKED before dispatch | Host config selected unsupported reasoning value `ultra`; App Server accepts only through `xhigh`; no model turn was created |
 | 2026-08-25 | macOS 26.5 arm64 | 0.149.0 | — | PASS: live operator lifecycle | One synthetic turn reached `VERIFIED`; duplicate submit and collect both returned `dispatched=false`; exact changed path and receipt digests were checked |
+| 2026-08-26 | macOS 26.5 arm64 | 0.149.0 | — | PASS: same-session live active queue | One synthetic active turn and its exact queued turn used one App Server adapter; exact artifact/readback passed; same-process and journal-restart repeats returned `dispatched=false` |
 | 2026-08-25 | macOS 26.5 arm64 | — | 0.20.0 | PASS: discovery/load | Isolated Hermes home discovered and loaded the complete external skill; no model call was made |
 
 A full Hermes-model-to-tool-to-Codex conversation remains an unqualified

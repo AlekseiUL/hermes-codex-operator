@@ -170,10 +170,17 @@ class ThreadPage:
 
 
 @dataclass(frozen=True, slots=True)
+class CatalogUserMessage:
+    client_message_id: str | None
+    input_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class CatalogTurn:
     turn_id: str
     status: str
     final_text: str | None
+    user_messages: tuple[CatalogUserMessage, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -100,12 +100,12 @@ transport-neutral local outbox. Delivery remains the host application's job.
 
 ## What is available today
 
-| Capability | v0.1.0 status |
+| Capability | Current source status |
 |---|---|
 | Clarify an idea; propose architecture, options, decomposition, and acceptance criteria | Included in the Hermes skill |
 | Start a new Codex task | Implemented in the core |
 | Continue one exact existing idle task once | Implemented as the explicit `continue` command |
-| Queue one exact active Desktop-owned task once | Experimental opt-in `queue` command, allowlisted only for Codex CLI/App Server 0.149.0 |
+| Queue one exact active loaded task once in the same qualified App Server session | Experimental opt-in `queue` command, allowlisted only for Codex CLI/App Server 0.149.0 |
 | Wait for the exact turn, read it authoritatively, and return the result | Implemented in the core |
 | Verify changed-file scope and argv-only checks | Implemented in the core |
 | Durable status, conservative recovery, immutable receipts | Implemented in the core |
@@ -246,10 +246,23 @@ loaded, verifies the initialized App Server's exact `0.149.0` runtime evidence,
 stores the message and baseline-turn digests, and enqueues once. A lost
 or malformed enqueue response gets one bounded queue inspection and no retry;
 zero, multiple, duplicated, or mismatched candidates become `UNKNOWN`. Queue
-disappearance is not completion: success still requires one uniquely
-correlated new turn plus authoritative completed exact-turn readback. This
-surface has synthetic qualification only and must be requalified for every
-Codex version.
+disappearance is not completion: the resulting turn must carry the exact queued
+client-message ID and normalized-input digest, followed by authoritative
+completed exact-turn readback. Active
+queues can be consumed automatically by Codex after the owner turn becomes
+terminal; `thread/queue/start` is used only after a bounded readback still shows
+the exact submission queued. A disposable live mutation passed on Codex 0.149.0
+on the qualified macOS host; every other Codex version still requires separate
+qualification.
+
+Experimental `queue` verification is deliberately end-state evidence, not
+per-turn filesystem attribution. Its workspace baseline is captured while the
+selected owner turn is still active, so receipt `changed_paths` may include
+changes from that owner or another concurrent writer as well as the queued turn.
+The exact queued input, resulting turn, final response, scope, and final checks
+are verified; the receipt does not claim which turn caused each file change. Use
+idle `continue`, or a demonstrably non-mutating owner, when causal isolation is
+required.
 
 For lifecycle commands, JSON `ok` means the operation is `VERIFIED`. `status`
 still exits `0` when it successfully reads a non-verified record, so automation
@@ -341,7 +354,8 @@ publication.
 
 ## Project status
 
-`v0.1.0` is a pre-alpha clean-room implementation. Its protocol and failure
+The current source tree is a pre-alpha `v0.1.0` release candidate, not a
+published-release claim. Its protocol and failure
 behavior have a comprehensive scripted suite, while live compatibility is
 qualified separately for each Codex CLI, Hermes, Python, and OS combination.
 Unqualified combinations are targets, not support claims. See
@@ -400,11 +414,12 @@ Server. Вы формулируете задачу обычным языком. 
 Нужно знать, какой именно запуск выполнился, что он изменил, какие проверки
 реально прошли и не отправилась ли одна задача дважды.
 
-### Что уже работает в v0.1.0
+### Что уже работает в текущем исходном коде
 
 - новый запуск Codex и продолжение того же контекста;
 - отдельная экспериментальная команда `queue` для однократной постановки
-  активной Desktop-задачи в общую очередь только с точным opt-in `0.149.0`;
+  точной активной задачи, загруженной в той же проверенной App Server-сессии,
+  только с точным opt-in `0.149.0`;
 - постоянные идентификаторы задачи, операции, потока и запуска;
 - защита от автоматической повторной отправки при неоднозначном результате;
 - точное чтение финального ответа через `thread/read`;
@@ -416,6 +431,12 @@ Server. Вы формулируете задачу обычным языком. 
   результата.
 - ограниченный каталог потоков, read-only подключение по точным `threadId` и
   `turnId`, постоянные watches и локальный outbox событий завершения;
+
+Для экспериментальной `queue` список изменённых файлов описывает общее конечное
+состояние за время активной исходной и поставленной в очередь задач. Он не
+доказывает, какой именно запуск изменил каждый файл. Если нужна причинная
+изоляция изменений, используйте `continue` для уже свободной задачи или
+исходный активный запуск, который гарантированно не меняет рабочую папку.
 
 Operator не является фоновым диспетчером, полноценной песочницей или заменой
 человеческой приёмки. Он может наблюдать только точный уже известный поток и

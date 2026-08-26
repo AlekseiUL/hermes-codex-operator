@@ -17,6 +17,14 @@ All notable changes to this project will be documented here. The format follows
   using the qualified Codex 0.149.0 experimental queue schemas.
 - Immutable SQLite v4 queue baselines with message/turn-set digests and atomic
   submission binding; v1/v2/v3 migration remains backward compatible.
+- Explicit disposable `scripts/live_queue_smoke.py` for opt-in active-queue
+  qualification against the caller's real local Codex account.
+- Bounded, strictly parsed `thread/list` catalog pagination and exact
+  `catalog read` through `thread/read` with opt-in raw result text.
+- Exact `threadId` + `turnId` read-only adoption and restart-durable watches.
+- Idempotent transport-neutral completion-event outbox with result SHA-256.
+- `catalog`, `catalog read`, `adopt`, `watch`, and `events list/ack` CLI commands.
+- Atomic SQLite v1-to-v2 migration and two-process watch concurrency coverage.
 
 ### Security
 
@@ -28,25 +36,29 @@ All notable changes to this project will be documented here. The format follows
 - Explicit queue add/start response identity contradictions now fail closed as
   `UNKNOWN` and cannot be recovered through a different matching queue item or
   unique readback turn.
-- No raw prompt or result was added to continuation or queue journal rows.
-
-## [0.1.0] - 2026-08-26
-
-### Added
-
-- Bounded, strictly parsed `thread/list` catalog pagination and exact
-  `catalog read` through `thread/read` with opt-in raw result text.
-- Exact `threadId` + `turnId` read-only adoption and restart-durable watches.
-- Idempotent transport-neutral completion-event outbox with result SHA-256.
-- `catalog`, `catalog read`, `adopt`, `watch`, and `events list/ack` CLI commands.
-- Atomic SQLite v1-to-v2 migration and two-process watch concurrency coverage.
-
-### Security
-
+- A new turn can never satisfy queue correlation while the exact queued
+  submission remains pending; this concurrent-turn race fails closed as
+  `UNKNOWN` and never re-enqueues.
 - Catalog, adoption, and watch polling use only `thread/list` and `thread/read`;
   they never resume or start a thread or turn.
 - Missing, duplicate, or conflicting exact identities fail closed as `UNKNOWN`.
-- Experimental API capability remains disabled; `project/list` is not included.
+- No raw prompt or result was added to continuation or queue journal rows.
+
+### Fixed
+
+- The live queue harness uses a direct shell hold instead of nested Python and
+  can report up to three explicit owner-preflight attempts while preserving the
+  one-`queue/add` limit.
+- Match Codex 0.149.0 queued-text normalization (`text_elements: []`) so live
+  semantic identity does not fail on a server-added default field.
+- Wait for active-owner terminal state and bounded automatic queue consumption
+  before using `thread/queue/start`.
+- Correlate an automatically consumed turn by the exact queued client-message ID
+  and normalized-input digest, preventing a concurrent unrelated turn from
+  producing false `VERIFIED` even if the queue changes between reads.
+- Require authoritative owner-terminal readback, exact queue removal after
+  manual start, stable thread/workspace identity, and mutually consistent final
+  turn status and text before queue verification.
 
 ## [0.0.1] - 2026-08-25
 
@@ -78,6 +90,5 @@ All notable changes to this project will be documented here. The format follows
 
 - Switched the project license from Apache-2.0 to MIT before the first release.
 
-[Unreleased]: https://github.com/AlekseiUL/hermes-codex-operator/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/AlekseiUL/hermes-codex-operator/releases/tag/v0.1.0
+[Unreleased]: https://github.com/AlekseiUL/hermes-codex-operator/compare/v0.0.1...HEAD
 [0.0.1]: https://github.com/AlekseiUL/hermes-codex-operator/releases/tag/v0.0.1

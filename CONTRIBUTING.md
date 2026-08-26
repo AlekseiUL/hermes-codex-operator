@@ -58,7 +58,12 @@ must never run in ordinary pull-request CI.
 
 ```bash
 python3 scripts/live_smoke.py --confirm-live-codex
+python3 scripts/live_queue_smoke.py --confirm-live-codex --owner-attempts 3
 ```
+
+`--owner-attempts` bounds only synthetic owner setup before `queue/add`; every
+preflight interruption is reported, and the harness still permits at most one
+queue submission.
 
 Before claiming a release is ready, follow
 [PRIVACY_RELEASE.md](docs/PRIVACY_RELEASE.md).

@@ -59,8 +59,22 @@ def turn_record(
     *,
     status: str = "completed",
     include_final: bool = True,
+    client_id: str | None = None,
+    input_text: str = "Build the synthetic widget.",
 ) -> dict[str, Any]:
     items: list[dict[str, Any]] = [
+        {
+            "id": "message-user",
+            "type": "userMessage",
+            "clientId": client_id,
+            "content": [
+                {
+                    "type": "text",
+                    "text": input_text,
+                    "text_elements": [],
+                }
+            ],
+        },
         {
             "id": "message-progress",
             "type": "agentMessage",
@@ -183,12 +197,24 @@ def main() -> None:
         assert added["params"] == {
             "threadId": THREAD_ID,
             "clientUserMessageId": "client-synthetic-001",
-            "input": [{"type": "text", "text": "Synthetic queued input."}],
+            "input": [
+                {
+                    "type": "text",
+                    "text": "Synthetic queued input.",
+                    "text_elements": [],
+                }
+            ],
         }
         submission = {
             "id": "submission-synthetic-001",
             "clientUserMessageId": "client-synthetic-001",
-            "input": [{"type": "text", "text": "Synthetic queued input."}],
+            "input": [
+                {
+                    "type": "text",
+                    "text": "Synthetic queued input.",
+                    "text_elements": [],
+                }
+            ],
         }
         response(added, {"queuedSubmission": submission})
         started = expect("thread/queue/start")
@@ -196,7 +222,17 @@ def main() -> None:
             "threadId": THREAD_ID,
             "queuedSubmissionId": "submission-synthetic-001",
         }
-        response(started, {"turn": turn_record(status="inProgress", include_final=False)})
+        response(
+            started,
+            {
+                "turn": turn_record(
+                    status="inProgress",
+                    include_final=False,
+                    client_id="client-synthetic-001",
+                    input_text="Synthetic queued input.",
+                )
+            },
+        )
         wait_until_killed()
 
     if SCENARIO == "catalog_read":
@@ -204,7 +240,12 @@ def main() -> None:
         assert read["params"] == {"threadId": THREAD_ID, "includeTurns": True}
         response(
             read,
-            {"thread": thread_record(os.path.abspath("."), [turn_record()])},
+            {
+                "thread": thread_record(
+                    os.path.abspath("."),
+                    [turn_record(client_id="client-synthetic-001")],
+                )
+            },
         )
         wait_until_killed()
 

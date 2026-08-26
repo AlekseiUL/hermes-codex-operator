@@ -15,6 +15,7 @@ from .base import (
     AdapterError,
     AdapterTimeout,
     AppServerProcessError,
+    CatalogUserMessage,
     DeliveryUnknown,
     LoadedThreadPage,
     ProtocolIntegrityError,
@@ -321,12 +322,15 @@ class AppServerAdapter:
         expected = self._nonempty_string(thread_id, "thread_id")
         text = self._nonempty_string(prompt, "prompt")
         client_id = self._nonempty_string(client_message_id, "client_message_id")
+        normalized_input = [
+            {"type": "text", "text": text, "text_elements": []}
+        ]
         result = await self._request(
             "thread/queue/add",
             {
                 "threadId": expected,
                 "clientUserMessageId": client_id,
-                "input": [{"type": "text", "text": text}],
+                "input": normalized_input,
             },
             side_effect=True,
         )
@@ -336,9 +340,7 @@ class AppServerAdapter:
             raise QueueIdentityConflict(
                 "thread/queue/add changed client message identity"
             )
-        expected_digest = sha256_text(
-            canonical_json({"input": [{"text": text, "type": "text"}]})
-        )
+        expected_digest = sha256_text(canonical_json({"input": normalized_input}))
         if submission.input_sha256 != expected_digest:
             raise QueueIdentityConflict("thread/queue/add changed queued input")
         return submission
@@ -1094,7 +1096,31 @@ class AppServerAdapter:
             raise ProtocolIntegrityError("thread/read turn.items must be an object array")
         final_messages: list[str] = []
         legacy_messages: list[str] = []
+        user_messages: list[CatalogUserMessage] = []
         for item in raw_items:
+            if item.get("type") == "userMessage":
+                client_id = item.get("clientId")
+                if client_id is not None and (
+                    not isinstance(client_id, str) or not client_id
+                ):
+                    raise ProtocolIntegrityError(
+                        "thread/read userMessage.clientId must be a non-empty string or null"
+                    )
+                raw_content = item.get("content")
+                if not isinstance(raw_content, list) or not raw_content or any(
+                    not isinstance(content, Mapping) for content in raw_content
+                ):
+                    raise ProtocolIntegrityError(
+                        "thread/read userMessage.content must be a non-empty object array"
+                    )
+                normalized = [dict(content) for content in raw_content]
+                user_messages.append(
+                    CatalogUserMessage(
+                        client_id,
+                        sha256_text(canonical_json({"input": normalized})),
+                    )
+                )
+                continue
             if item.get("type") != "agentMessage":
                 continue
             text = item.get("text")
@@ -1105,7 +1131,12 @@ class AppServerAdapter:
             elif item.get("phase") is None:
                 legacy_messages.append(text)
         candidates = final_messages or legacy_messages
-        return CatalogTurn(turn_id, status, candidates[-1] if candidates else None)
+        return CatalogTurn(
+            turn_id,
+            status,
+            candidates[-1] if candidates else None,
+            tuple(user_messages),
+        )
 
     @staticmethod
     def _validate_effective_cwd(value: Any, workspace: Path, field: str) -> None:

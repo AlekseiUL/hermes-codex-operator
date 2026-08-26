@@ -95,12 +95,15 @@ inspection, exact submission/turn binding, and authoritative completion.
 `src/hermes_codex_operator/adapters/app_server.py`,
 `src/hermes_codex_operator/journal.py`, `src/hermes_codex_operator/cli.py`,
 `tests/test_queueing.py`, `tests/test_app_server_protocol.py`
-**Commands:** `python3 -m unittest tests.test_queueing tests.test_app_server_protocol -v`
+**Commands:** `python3 -m unittest tests.test_queueing tests.test_app_server_protocol -v`;
+`python3 scripts/live_queue_smoke.py --confirm-live-codex`
 **Check:** exact opt-in, unsupported versions, ownership ambiguity, contention,
 lost/malformed enqueue recovery, duplicate/mismatched identity, baseline bounds,
 turn correlation, exact readback, and repeat/restart behavior are covered.
 **Result:** One experimental 0.149.0 queue mutation; stable adapter remains
-`experimentalApi: false`, and queue never becomes continuation fallback.
+`experimentalApi: false`, and queue never becomes continuation fallback. The
+live 0.149.0 smoke qualified server-normalized input identity and active queue
+auto-consumption before the bounded manual-start fallback.
 
 ### Step 7: Add privacy and release gates
 

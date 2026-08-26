@@ -22,6 +22,7 @@ from hermes_codex_operator.adapters.app_server import (
     EXPERIMENTAL_QUEUE_API_VERSION,
     QueueIdentityConflict,
 )
+from hermes_codex_operator.models import canonical_json, sha256_text
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_app_server.py"
@@ -128,6 +129,26 @@ class AppServerProtocolTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 readback.turns[0].final_text,
                 "Synthetic verified implementation report.",
+            )
+            self.assertEqual(
+                readback.turns[0].user_messages[0].client_message_id,
+                "client-synthetic-001",
+            )
+            self.assertEqual(
+                readback.turns[0].user_messages[0].input_sha256,
+                sha256_text(
+                    canonical_json(
+                        {
+                            "input": [
+                                {
+                                    "type": "text",
+                                    "text": "Build the synthetic widget.",
+                                    "text_elements": [],
+                                }
+                            ]
+                        }
+                    )
+                ),
             )
         finally:
             await adapter.close()

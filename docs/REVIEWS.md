@@ -1,11 +1,12 @@
-# Pre-publication reviews
+# Release reviews
 
-**Status:** local release gates passed; public CI and public-source install pending
-**Reviewed:** 2026-08-25
+**Status:** local release gates passed for the current candidate
+**Reviewed:** 2026-08-26
 **Boundary:** source, synthetic tests, documentation, and local release process
 
-No review below authorizes publication. A real Codex account smoke test and a
-public-host release are deliberately separate, opt-in actions.
+No review below replaces owner authorization. Real Codex account smoke tests
+remain separate, explicit actions; every pushed revision still requires public
+CI and public-source install readback.
 
 ## Lifecycle and crash-safety review
 
@@ -78,9 +79,26 @@ below; this review is not permission to publish a different tree.
 - This is a pre-alpha local MVP, not a security audit or an OS sandbox.
 - The automated suite uses a scripted App Server and synthetic workspaces.
 - A live App Server smoke test can create real local Codex state and is not part
-  of the default test suite. The explicit pre-publication smoke passed on Codex
+  of the default test suite. The explicit release smoke passed on Codex
   0.149.0: one synthetic turn reached `VERIFIED`, while duplicate submit and
-  collect both proved `dispatched=false`.
+  collect both proved `dispatched=false`. A separate same-App-Server-session
+  active-queue smoke passed on 2026-08-26: server-normalized input identity,
+  automatic queue consumption, exact artifact/readback, and
+  same-process/journal-restart non-dispatch were verified.
+- A subsequent independent adversarial review found that one unrelated new turn
+  could be accepted if the exact submission disappeared between two protocol
+  reads. Resulting turns are now bound only when their user message carries the
+  exact queued client ID and normalized-input digest, with a regression proving
+  `UNKNOWN`, one enqueue, zero queue-start calls, and no restart dispatch.
+- The final-tree live recheck used one bounded invocation on Codex 0.149.0.
+  Two synthetic owner setups were interrupted before `queue/add`; the third
+  reached authoritative `active/inProgress`, after which exactly one queue
+  submission reached `VERIFIED`. The exact artifact digest matched, while both
+  same-process and journal-restart repeats remained non-dispatch observations.
+- Active-task queue receipts intentionally use end-state rather than per-turn
+  filesystem attribution: their workspace interval includes the selected active
+  owner. Exact queued input/turn/result and final checks are enforced, while
+  callers needing causal changed-path isolation must use idle `continue`.
 - The earlier Codex 0.124.0 qualification attempt remains recorded as blocked
   before dispatch because the host configured unsupported reasoning value
   `ultra`; it is not evidence for or against 0.149.0.

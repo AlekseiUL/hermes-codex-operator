@@ -37,11 +37,13 @@ class WorkContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             value = contract_value(Path(root))
             contract = WorkContract.from_dict(value)
+            prompt = value["prompt"]
+            assert isinstance(prompt, str)
 
         self.assertEqual(contract.schema_version, "1")
         self.assertEqual(contract.allowed_change_globs, ("src/**", "tests/**"))
         self.assertIsInstance(contract.verification[0], tuple)
-        self.assertEqual(contract.prompt_sha256, sha256_text(value["prompt"]))
+        self.assertEqual(contract.prompt_sha256, sha256_text(prompt))
         self.assertNotIn("prompt", contract.persistence_dict())
         self.assertEqual(
             contract.persistence_dict()["prompt_sha256"], contract.prompt_sha256

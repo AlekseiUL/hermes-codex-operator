@@ -72,6 +72,7 @@ class OperatorEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.operation.state, OperationState.VERIFIED)
         self.assertEqual(first.final_text, "Synthetic Codex result.")
         self.assertEqual(backend.start_turn_calls, 1)
+        assert first.receipt is not None
         self.assertEqual(first.receipt.changed_paths[0].path, "src/app.py")
         self.assertEqual(
             first.receipt.result_sha256,
@@ -150,6 +151,7 @@ class OperatorEngineTests(unittest.IsolatedAsyncioTestCase):
         )
         result = await self.operator(backend).submit(contract)
         self.assertEqual(result.operation.state, OperationState.VERIFICATION_FAILED)
+        assert result.receipt is not None
         self.assertEqual(result.receipt.verification[0].exit_code, 9)
 
     async def test_scope_violation_is_not_verified(self) -> None:
@@ -159,6 +161,7 @@ class OperatorEngineTests(unittest.IsolatedAsyncioTestCase):
         backend = FakeBackend(mutate_workspace=mutate)
         result = await self.operator(backend).submit(contract_for(self.workspace))
         self.assertEqual(result.operation.state, OperationState.SCOPE_VIOLATION)
+        assert result.receipt is not None
         self.assertEqual(result.receipt.changed_paths[0].path, "outside.txt")
 
     async def test_wait_timeout_stays_bound_and_blocks_retry(self) -> None:
@@ -186,6 +189,7 @@ class OperatorEngineTests(unittest.IsolatedAsyncioTestCase):
 
         backend = FakeBackend()
         contract = contract_for(self.workspace)
+        assert self.journal.path is not None
         second_journal = SQLiteJournal(self.journal.path)
         try:
             first_operator = Operator(
@@ -235,6 +239,7 @@ class OperatorEngineTests(unittest.IsolatedAsyncioTestCase):
         )
         result = await self.operator(FakeBackend()).submit(contract)
         self.assertEqual(result.operation.state, OperationState.SCOPE_VIOLATION)
+        assert result.receipt is not None
         self.assertEqual(result.receipt.changed_paths[0].path, "outside.txt")
 
     async def test_verification_cancellation_kills_child_and_finalizes_state(self) -> None:

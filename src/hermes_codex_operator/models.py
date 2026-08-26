@@ -13,7 +13,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 
 SCHEMA_VERSION = "1"

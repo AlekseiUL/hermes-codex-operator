@@ -10,7 +10,7 @@ import sys
 from typing import Sequence
 
 from .adapters.app_server import AppServerAdapter, EXPERIMENTAL_QUEUE_API_VERSION
-from .adapters.base import AdapterError, CodexAdapter, UnsupportedCapability
+from .adapters.base import AdapterError, UnsupportedCapability
 from .catalog import CatalogOperator
 from .continuation import ContinuationOperator
 from .engine import AdapterFactory, Operator, OperatorOutcome
@@ -18,6 +18,9 @@ from .journal import CompletionEvent, JournalError, SQLiteJournal, WatchRecord
 from .models import ContractValidationError, WorkContract, sha256_text
 from .queueing import QueueContinuationOperator
 from .workspace import WorkspacePolicy
+
+
+SHARED_APP_SERVER_PROXY_COMMAND = ("codex", "app-server", "proxy")
 
 
 def default_state_path() -> Path:
@@ -81,6 +84,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     queue.add_argument("--contract", required=True, help="JSON file or - for stdin")
     queue.add_argument("--thread-id", required=True, help="exact active thread ID")
+    queue.add_argument(
+        "--shared-app-server",
+        action="store_true",
+        help=(
+            "connect through codex app-server proxy to the already-running "
+            "managed App Server that owns the active thread"
+        ),
+    )
     queue.add_argument(
         "--experimental-api-version",
         required=True,
@@ -277,6 +288,11 @@ def main(
             value = _doctor()
             _emit(value, as_json=as_json)
             return 0 if value["ok"] else 2
+        if args.command == "queue" and not args.shared_app_server:
+            raise UnsupportedCapability(
+                "queue CLI requires --shared-app-server; a fresh App Server "
+                "cannot prove ownership of another session's active thread"
+            )
 
         with SQLiteJournal(args.state) as journal:
             if args.command == "status":
@@ -370,7 +386,10 @@ def main(
                     if version != EXPERIMENTAL_QUEUE_API_VERSION:
                         raise UnsupportedCapability("UNSUPPORTED_CAPABILITY")
                     factory = adapter_factory or (
-                        lambda: AppServerAdapter(experimental_api_version=version)
+                        lambda: AppServerAdapter(
+                            SHARED_APP_SERVER_PROXY_COMMAND,
+                            experimental_api_version=version,
+                        )
                     )
                 else:
                     factory = adapter_factory or (lambda: AppServerAdapter())

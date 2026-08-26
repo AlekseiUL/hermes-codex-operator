@@ -157,7 +157,8 @@ class CliTests(unittest.TestCase):
             backend = FakeBackend()
             backend.threads[backend.thread_id] = root_path
             backend.turns[(backend.thread_id, backend.turn_id)] = "completed"
-            factory = lambda: FakeCodexAdapter(backend)
+            def factory() -> FakeCodexAdapter:
+                return FakeCodexAdapter(backend)
 
             output = StringIO()
             with redirect_stdout(output):
@@ -317,17 +318,49 @@ class CliTests(unittest.TestCase):
             base = [
                 "--state", str(root_path / "state.sqlite3"), "queue", "--json",
                 "--contract", str(contract), "--thread-id", backend.thread_id,
-                "--allow-root", str(root_path), "--experimental-api-version",
+                "--allow-root", str(root_path), "--shared-app-server",
+                "--experimental-api-version",
             ]
 
             output = StringIO()
+            without_shared = [
+                item for item in base if item != "--shared-app-server"
+            ]
             with redirect_stdout(output):
                 code = main(
-                    [*base, EXPERIMENTAL_QUEUE_API_VERSION],
+                    [*without_shared, EXPERIMENTAL_QUEUE_API_VERSION],
                     adapter_factory=lambda: FakeCodexAdapter(backend),
                 )
+            self.assertEqual(code, 2)
+            self.assertEqual(
+                json.loads(output.getvalue())["error_code"],
+                "UNSUPPORTED_CAPABILITY",
+            )
+            self.assertEqual(backend.queue_add_calls, 0)
+
+            adapter_commands: list[tuple[str, ...]] = []
+
+            def shared_adapter(command, *, experimental_api_version):
+                adapter_commands.append(tuple(command))
+                self.assertEqual(
+                    experimental_api_version,
+                    EXPERIMENTAL_QUEUE_API_VERSION,
+                )
+                return FakeCodexAdapter(backend)
+
+            output = StringIO()
+            with patch(
+                "hermes_codex_operator.cli.AppServerAdapter",
+                side_effect=shared_adapter,
+            ):
+                with redirect_stdout(output):
+                    code = main([*base, EXPERIMENTAL_QUEUE_API_VERSION])
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(output.getvalue())["status"], "VERIFIED")
+            self.assertEqual(
+                adapter_commands,
+                [("codex", "app-server", "proxy")],
+            )
             self.assertEqual(backend.queue_add_calls, 1)
 
             output = StringIO()

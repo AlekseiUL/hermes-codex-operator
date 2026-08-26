@@ -111,11 +111,23 @@ once, and atomically binds the exact submission ID. A lost or malformed enqueue
 response permits one queue inspection for one exact durable match, never a
 second enqueue. Zero, multiple, duplicate, or mismatched matches are `UNKNOWN`.
 
-Queue disappearance is not success. The operation needs exactly one new turn
-relative to the baseline, exact turn binding, a completed authoritative
-readback, and a final result before verification. Repeat or restart only
-observes durable state with `dispatched=false`. This capability has synthetic
-qualification only; live queue mutation needs separate approval.
+Queue disappearance is not success. After the active owner turn becomes
+terminal, the operator first performs bounded authoritative reads because Codex
+0.149.0 can consume the queued submission automatically. `thread/queue/start`
+is only a fallback while the exact submission remains queued. The resulting
+turn must contain the exact queued client-message ID and normalized-input
+digest before binding, then reach completed authoritative readback with a final
+result before verification.
+Repeat or restart only observes durable state with `dispatched=false`. A live
+queue mutation passed on the qualified 0.149.0 macOS host; other versions need
+separate qualification and approval.
+
+`queue` proves the exact queued message, resulting turn, completed result, and
+declared final workspace checks. It does not provide per-turn filesystem
+attribution: the workspace baseline predates completion of the active owner, so
+receipt `changed_paths` cover the combined owner-plus-queued interval. Select
+idle `continue` instead when the user needs proof that each changed path came
+from only the requested follow-up turn.
 
 An unsupported server approval request fails closed instead of silently
 broadening permissions. A future interactive approval adapter requires a new

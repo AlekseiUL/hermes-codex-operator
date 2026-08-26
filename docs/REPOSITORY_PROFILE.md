@@ -46,4 +46,4 @@ without making the brand name unreadable.
 2. Run tests, package smoke, live Codex smoke, clean Hermes smoke, and every
    privacy mode against that exact commit, sdist, and wheel.
 3. Have an independent reviewer inspect the tree, history, and release archive.
-4. Publish the already-scanned commit and tag it `v0.0.1`.
+4. Publish the already-scanned commit and tag it `v0.1.0`.
