@@ -105,7 +105,7 @@ def make_receipt(
 
 
 class JournalReservationTests(unittest.TestCase):
-    def test_v2_journal_migrates_to_v4_without_losing_operations(self) -> None:
+    def test_v2_journal_migrates_to_v5_without_losing_operations(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             workspace = root_path / "workspace"
@@ -115,6 +115,8 @@ class JournalReservationTests(unittest.TestCase):
             with SQLiteJournal(database) as journal:
                 journal.reserve(contract)
             with closing(sqlite3.connect(database)) as legacy:
+                legacy.execute("DROP TRIGGER operations_dispatch_kind_is_immutable")
+                legacy.execute("ALTER TABLE operations DROP COLUMN dispatch_kind")
                 legacy.execute("DROP TRIGGER continuation_baselines_are_immutable_on_update")
                 legacy.execute("DROP TRIGGER continuation_baselines_are_immutable_on_delete")
                 legacy.execute("DROP TABLE continuation_baselines")
@@ -123,7 +125,19 @@ class JournalReservationTests(unittest.TestCase):
             with SQLiteJournal(database) as migrated:
                 self.assertEqual(migrated.get_operation(contract.operation_id).operation_id, contract.operation_id)
                 with closing(sqlite3.connect(database)) as check:
-                    self.assertEqual(check.execute("PRAGMA user_version").fetchone()[0], 4)
+                    self.assertEqual(check.execute("PRAGMA user_version").fetchone()[0], 5)
+                    columns = {
+                        row[1]
+                        for row in check.execute("PRAGMA table_info(operations)")
+                    }
+                    self.assertIn("dispatch_kind", columns)
+                    self.assertEqual(
+                        check.execute(
+                            "SELECT dispatch_kind FROM operations WHERE operation_id = ?",
+                            (contract.operation_id,),
+                        ).fetchone()[0],
+                        "ordinary",
+                    )
                     self.assertIsNotNone(
                         check.execute(
                             "SELECT name FROM sqlite_master WHERE name = 'continuation_baselines'"
@@ -133,6 +147,69 @@ class JournalReservationTests(unittest.TestCase):
                         check.execute(
                             "SELECT name FROM sqlite_master WHERE name = 'queue_baselines'"
                         ).fetchone()
+                    )
+
+    def test_v4_migration_backfills_continue_and_queue_dispatch_kinds(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            workspace = root_path / "workspace"
+            workspace.mkdir()
+            database = root_path / "journal.sqlite3"
+            continuation = make_contract(
+                workspace,
+                task_id="synthetic-continuation-task",
+                operation_id="synthetic-continuation-001",
+            )
+            queue = make_contract(
+                workspace,
+                task_id="synthetic-queue-task",
+                operation_id="synthetic-queue-001",
+            )
+            with SQLiteJournal(database) as journal:
+                journal.reserve_operation(
+                    continuation, dispatch_kind="continue"
+                )
+                journal.bind_thread(
+                    continuation.task_id,
+                    "thread-synthetic-continuation",
+                )
+                journal.store_continuation_baseline(
+                    continuation.operation_id,
+                    "thread-synthetic-continuation",
+                    (),
+                )
+                journal.reserve_operation(queue, dispatch_kind="queue")
+                journal.bind_thread(queue.task_id, "thread-synthetic-queue")
+                journal.store_queue_baseline(
+                    queue.operation_id,
+                    "thread-synthetic-queue",
+                    queue.prompt_sha256,
+                    (),
+                )
+            with closing(sqlite3.connect(database)) as legacy:
+                legacy.execute("DROP TRIGGER operations_dispatch_kind_is_immutable")
+                legacy.execute("ALTER TABLE operations DROP COLUMN dispatch_kind")
+                legacy.execute("PRAGMA user_version = 4")
+                legacy.commit()
+
+            with SQLiteJournal(database) as migrated:
+                self.assertEqual(
+                    migrated.get_operation(
+                        continuation.operation_id
+                    ).dispatch_kind,
+                    "continue",
+                )
+                self.assertEqual(
+                    migrated.get_operation(queue.operation_id).dispatch_kind,
+                    "queue",
+                )
+                with self.assertRaises(IdempotencyConflict):
+                    migrated.reserve_operation(
+                        continuation, dispatch_kind="queue"
+                    )
+                with self.assertRaises(IdempotencyConflict):
+                    migrated.reserve_operation(
+                        queue, dispatch_kind="continue"
                     )
 
     def test_reservation_is_idempotent_and_conflicts_on_changed_content(self) -> None:
@@ -155,6 +232,33 @@ class JournalReservationTests(unittest.TestCase):
                 changed_policy = make_contract(workspace, timeout_seconds=61)
                 with self.assertRaises(IdempotencyConflict):
                     journal.reserve_operation(changed_policy)
+
+    def test_dispatch_kind_is_reserved_atomically_and_cannot_change(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            workspace = root_path / "workspace"
+            workspace.mkdir()
+            contract = make_contract(workspace)
+            with SQLiteJournal(root_path / "journal.sqlite3") as journal:
+                first = journal.reserve_operation(
+                    contract, dispatch_kind="queue"
+                )
+                duplicate = journal.reserve_operation(
+                    contract, dispatch_kind="queue"
+                )
+
+                self.assertTrue(first.created)
+                self.assertFalse(duplicate.created)
+                self.assertEqual(first.operation.dispatch_kind, "queue")
+                with self.assertRaises(IdempotencyConflict):
+                    journal.reserve_operation(
+                        contract, dispatch_kind="ordinary"
+                    )
+                observed = journal.reserve_operation(
+                    contract, dispatch_kind=None
+                )
+                self.assertFalse(observed.created)
+                self.assertEqual(observed.operation.dispatch_kind, "queue")
 
     def test_task_and_operation_identity_cannot_be_rebound(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -371,7 +475,7 @@ class JournalLifecycleTests(unittest.TestCase):
                 reconciled = journal.reconcile(contract.operation_id, "RUNNING")
                 self.assertEqual(reconciled.state, OperationState.RUNNING)
 
-    def test_explicit_abandon_only_closes_identity_less_ambiguity(self) -> None:
+    def test_explicit_abandon_only_closes_unrecoverable_open_state(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             workspace = root_path / "workspace"
@@ -420,6 +524,48 @@ class JournalLifecycleTests(unittest.TestCase):
                             include_verification=False,
                         ),
                     )
+
+                continuation = make_contract(
+                    workspace,
+                    task_id="synthetic-continuation-task",
+                    operation_id="synthetic-continuation-001",
+                )
+                journal.reserve_operation(
+                    continuation,
+                    dispatch_kind="continue",
+                )
+                journal.bind_thread(
+                    continuation.task_id,
+                    "thread-synthetic-continuation",
+                )
+                journal.transition(continuation.operation_id, "READY")
+                journal.transition(continuation.operation_id, "DISPATCHING")
+                journal.bind_turn(
+                    continuation.operation_id,
+                    "turn-synthetic-continuation",
+                )
+                journal.transition(
+                    continuation.operation_id,
+                    "UNKNOWN",
+                    failure_code="transport_lost",
+                )
+                abandoned = journal.abandon_unrecoverable(
+                    continuation.operation_id,
+                    make_receipt(
+                        continuation,
+                        status=OperationState.FAILED,
+                        failure_code=(
+                            "operator_abandoned_unrecoverable_operation"
+                        ),
+                        thread_id="thread-synthetic-continuation",
+                        turn_id="turn-synthetic-continuation",
+                        include_verification=False,
+                    ),
+                )
+                self.assertEqual(
+                    abandoned.operation.state,
+                    OperationState.FAILED,
+                )
 
     def test_thread_and_turn_cannot_be_shared_by_different_records(self) -> None:
         with tempfile.TemporaryDirectory() as root:

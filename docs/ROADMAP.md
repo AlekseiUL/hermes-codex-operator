@@ -29,8 +29,10 @@ Before Desktop integration, the portable core implements two separate bounded
 mutations: stable `continue` for one exact idle thread, and an experimental
 exact-version `queue` path for one proven active loaded thread. Queue is
 allowlisted only for Codex 0.149.0, is never a continuation fallback, and has
-synthetic failure-path coverage plus one qualified disposable live mutation on
-macOS. Project discovery and Desktop automation remain outside these slices.
+synthetic failure-path coverage. A historical same-adapter mutation passed on
+macOS; the managed-daemon proxy CLI still requires exact-commit live
+qualification. Project discovery and Desktop automation remain outside these
+slices.
 
 Investigate a version-gated macOS adapter for creating or associating visible
 Codex Desktop projects and tasks. Prefer documented APIs or supported app state.

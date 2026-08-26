@@ -89,8 +89,10 @@ this stable continuation path.
 ### Step 6b: Queue one exact active task through an experimental shared queue
 
 **What:** Add a separate exact-version opt-in `queue` command with loaded/active
-ownership proof, immutable queue baseline, one enqueue, one bounded recovery
-inspection, exact submission/turn binding, and authoritative completion.
+ownership proof in one managed App Server, immutable queue baseline, one
+enqueue, one bounded recovery inspection, exact submission/turn binding, and
+authoritative completion. The public CLI uses only the fixed managed-daemon
+proxy transport.
 **Files:** `src/hermes_codex_operator/queueing.py`,
 `src/hermes_codex_operator/adapters/app_server.py`,
 `src/hermes_codex_operator/journal.py`, `src/hermes_codex_operator/cli.py`,
@@ -101,9 +103,11 @@ inspection, exact submission/turn binding, and authoritative completion.
 lost/malformed enqueue recovery, duplicate/mismatched identity, baseline bounds,
 turn correlation, exact readback, and repeat/restart behavior are covered.
 **Result:** One experimental 0.149.0 queue mutation; stable adapter remains
-`experimentalApi: false`, and queue never becomes continuation fallback. The
-live 0.149.0 smoke qualified server-normalized input identity and active queue
-auto-consumption before the bounded manual-start fallback.
+`experimentalApi: false`, and queue never becomes continuation fallback.
+Synthetic tests cover automatic consumption and manual start. The earlier live
+smoke used one injected adapter and did not qualify the public managed-daemon
+proxy CLI or distinguish which consumption branch ran; the rewritten CLI smoke
+must run on the exact release commit.
 
 ### Step 7: Add privacy and release gates
 

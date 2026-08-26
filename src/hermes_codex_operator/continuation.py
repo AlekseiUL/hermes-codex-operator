@@ -44,7 +44,9 @@ class ContinuationOperator(Operator):
         self, contract: WorkContract, *, thread_id: str
     ) -> OperatorOutcome:
         expected_thread = validate_external_id(thread_id, "thread_id")
-        reservation = self.journal.reserve_operation(contract)
+        reservation = self.journal.reserve_operation(
+            contract, dispatch_kind="continue"
+        )
         with self.journal.operation_guard(contract.operation_id) as owned:
             if not owned or not reservation.created:
                 return self._observe_existing(contract)

@@ -18,6 +18,7 @@ from .adapters.base import (
     ReadbackMissingResult,
     RemoteTurnFailed,
     TurnReadback,
+    UnsupportedCapability,
 )
 from .continuation import MAX_BASELINE_TURNS
 from .engine import AdapterFactory, Operator, OperatorOutcome
@@ -43,8 +44,6 @@ class QueueContinuationOperator(Operator):
         experimental_api_version: str,
     ) -> None:
         if experimental_api_version != EXPERIMENTAL_QUEUE_API_VERSION:
-            from .adapters.base import UnsupportedCapability
-
             raise UnsupportedCapability("UNSUPPORTED_CAPABILITY")
         super().__init__(journal, adapter_factory, workspace_policy)
         self.experimental_api_version = experimental_api_version
@@ -53,7 +52,9 @@ class QueueContinuationOperator(Operator):
         self, contract: WorkContract, *, thread_id: str
     ) -> OperatorOutcome:
         expected_thread = validate_external_id(thread_id, "thread_id")
-        reservation = self.journal.reserve_operation(contract)
+        reservation = self.journal.reserve_operation(
+            contract, dispatch_kind="queue"
+        )
         with self.journal.operation_guard(contract.operation_id) as owned:
             if not owned or not reservation.created:
                 return self._observe_existing(contract)
@@ -85,6 +86,13 @@ class QueueContinuationOperator(Operator):
                     baseline_ids = remote.thread.turn_ids
                     if len(baseline_ids) > MAX_BASELINE_TURNS:
                         raise ProtocolIntegrityError("baseline turn set exceeds its bound")
+                except UnsupportedCapability:
+                    return self._terminal_outcome(
+                        contract,
+                        OperationState.FAILED,
+                        "UNSUPPORTED_CAPABILITY",
+                        dispatched=False,
+                    )
                 except (AdapterError, KeyError, ValueError):
                     return self._terminal_outcome(
                         contract,

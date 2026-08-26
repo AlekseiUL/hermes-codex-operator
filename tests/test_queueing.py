@@ -122,6 +122,104 @@ class QueueContinuationOperatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(backend.queue_add_calls, 1)
         self.assertEqual(backend.queue_start_calls, 1)
 
+    async def test_early_queue_reservation_cannot_become_ordinary_dispatch(
+        self,
+    ) -> None:
+        backend = self.backend()
+        contract = queue_contract(
+            self.workspace,
+            "queue-early-reservation-001",
+        )
+        reservation = self.journal.reserve_operation(
+            contract, dispatch_kind="queue"
+        )
+        self.assertTrue(reservation.created)
+        self.assertEqual(reservation.operation.dispatch_kind, "queue")
+
+        generic = Operator(
+            self.journal,
+            lambda: FakeCodexAdapter(backend),
+            WorkspacePolicy((self.root,)),
+        )
+        submitted = await generic.submit(contract)
+        recovered = await generic.recover(contract)
+
+        for outcome in (submitted, recovered):
+            self.assertEqual(outcome.operation.state, OperationState.QUEUED)
+            self.assertEqual(outcome.operation.dispatch_kind, "queue")
+            self.assertFalse(outcome.dispatched)
+        self.assertEqual(backend.start_turn_calls, 0)
+
+    async def test_restart_can_abandon_early_queue_reservation(self) -> None:
+        backend = self.backend()
+        contract = queue_contract(
+            self.workspace,
+            "queue-crash-after-reserve-001",
+        )
+        self.journal.reserve_operation(contract, dispatch_kind="queue")
+
+        reopened = SQLiteJournal(self.database)
+        try:
+            generic = Operator(
+                reopened,
+                lambda: FakeCodexAdapter(backend),
+                WorkspacePolicy((self.root,)),
+            )
+            abandoned = await generic.abandon(contract)
+            self.assertEqual(abandoned.operation.state, OperationState.FAILED)
+            self.assertEqual(
+                abandoned.operation.failure_code,
+                "operator_abandoned_unrecoverable_operation",
+            )
+            repeated = await generic.abandon(contract)
+            self.assertEqual(repeated.operation, abandoned.operation)
+            self.assertEqual(repeated.receipt, abandoned.receipt)
+            self.assertFalse(repeated.dispatched)
+            follow_up = queue_contract(
+                self.workspace,
+                "queue-after-early-abandon-001",
+            )
+            self.assertTrue(
+                reopened.reserve_operation(
+                    follow_up, dispatch_kind="queue"
+                ).created
+            )
+        finally:
+            reopened.close()
+
+    async def test_runtime_version_mismatch_is_not_busy_unknown(self) -> None:
+        backend = self.backend()
+        contract = queue_contract(
+            self.workspace,
+            "queue-runtime-mismatch-001",
+        )
+
+        class UnsupportedRuntimeAdapter(FakeCodexAdapter):
+            async def list_loaded_threads(self, *, cursor=None, limit=100):
+                raise UnsupportedCapability("UNSUPPORTED_CAPABILITY")
+
+        outcome = await self.operator(
+            backend, UnsupportedRuntimeAdapter
+        ).continue_active(contract, thread_id=self.thread_id)
+
+        self.assertEqual(outcome.operation.state, OperationState.FAILED)
+        self.assertEqual(
+            outcome.operation.failure_code,
+            "UNSUPPORTED_CAPABILITY",
+        )
+        self.assertFalse(outcome.dispatched)
+        self.assertEqual(backend.queue_add_calls, 0)
+        follow_up = queue_contract(
+            self.workspace,
+            "queue-after-runtime-mismatch-001",
+        )
+        self.assertTrue(
+            self.journal.reserve_operation(
+                follow_up, dispatch_kind="queue"
+            ).created
+        )
+        self.assertEqual(backend.queue_add_calls, 0)
+
     async def test_queue_start_waits_for_active_owner_turn_terminal(self) -> None:
         backend = self.backend()
 
@@ -947,6 +1045,20 @@ class QueueContinuationOperatorTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(outcome.dispatched)
         self.assertEqual(backend.resume_thread_calls, 0)
         self.assertEqual(backend.read_turn_calls, 0)
+
+        abandoned = await generic.abandon(contract)
+        self.assertEqual(abandoned.operation.state, OperationState.FAILED)
+        self.assertEqual(
+            abandoned.operation.failure_code,
+            "operator_abandoned_unrecoverable_operation",
+        )
+        self.assertFalse(abandoned.dispatched)
+
+        follow_up = queue_contract(
+            self.workspace,
+            "queue-after-explicit-abandon-001",
+        )
+        self.assertTrue(self.journal.reserve_operation(follow_up).created)
 
     async def test_successful_queue_start_must_remove_exact_submission(self) -> None:
         backend = self.backend()

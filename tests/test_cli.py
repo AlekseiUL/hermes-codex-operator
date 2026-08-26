@@ -93,6 +93,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["status"], "VERIFIED")
+            self.assertEqual(payload["dispatch_kind"], "ordinary")
             self.assertNotIn(raw_prompt, output.getvalue())
 
             output = StringIO()
@@ -107,7 +108,9 @@ class CliTests(unittest.TestCase):
                     ]
                 )
             self.assertEqual(code, 0)
-            self.assertEqual(json.loads(output.getvalue())["status"], "VERIFIED")
+            status = json.loads(output.getvalue())
+            self.assertEqual(status["status"], "VERIFIED")
+            self.assertEqual(status["dispatch_kind"], "ordinary")
 
     def test_contract_outside_allowed_root_fails_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as other:
@@ -280,7 +283,9 @@ class CliTests(unittest.TestCase):
             with redirect_stdout(output):
                 code = main(command, adapter_factory=lambda: FakeCodexAdapter(backend))
             self.assertEqual(code, 0)
-            self.assertTrue(json.loads(output.getvalue())["dispatched"])
+            continued = json.loads(output.getvalue())
+            self.assertTrue(continued["dispatched"])
+            self.assertEqual(continued["dispatch_kind"], "continue")
 
             output = StringIO()
             with redirect_stdout(output):
@@ -356,7 +361,9 @@ class CliTests(unittest.TestCase):
                 with redirect_stdout(output):
                     code = main([*base, EXPERIMENTAL_QUEUE_API_VERSION])
             self.assertEqual(code, 0)
-            self.assertEqual(json.loads(output.getvalue())["status"], "VERIFIED")
+            queued = json.loads(output.getvalue())
+            self.assertEqual(queued["status"], "VERIFIED")
+            self.assertEqual(queued["dispatch_kind"], "queue")
             self.assertEqual(
                 adapter_commands,
                 [("codex", "app-server", "proxy")],

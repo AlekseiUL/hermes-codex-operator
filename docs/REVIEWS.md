@@ -1,12 +1,13 @@
 # Release reviews
 
-**Status:** local release gates passed for the current candidate
+**Status:** `v0.1.0` candidate review in progress; not release-ready
 **Reviewed:** 2026-08-26
 **Boundary:** source, synthetic tests, documentation, and local release process
 
-No review below replaces owner authorization. Real Codex account smoke tests
-remain separate, explicit actions; every pushed revision still requires public
-CI and public-source install readback.
+Most review records below describe the released `v0.0.1` baseline. The new
+managed-daemon queue path remains a candidate until its exact commit passes all
+local gates, public CI, artifact readback, and an explicitly authorized live
+smoke. No review replaces owner authorization to publish.
 
 ## Lifecycle and crash-safety review
 
@@ -70,31 +71,28 @@ include:
 - App Server, OS, Python, Hermes, Desktop, notification, and restart claims are
   qualified to the evidence actually available.
 
-Final verdict: no known publication-surface blocker in the reviewed source.
-The exact publication commit and its rebuilt artifacts still require the gates
-below; this review is not permission to publish a different tree.
+Historical verdict for the reviewed `v0.0.1` source: no known
+publication-surface blocker. The current `v0.1.0` tree has changed and must be
+reviewed and rebuilt again; this record is not permission to publish it.
 
 ## Residual limits
 
 - This is a pre-alpha local MVP, not a security audit or an OS sandbox.
 - The automated suite uses a scripted App Server and synthetic workspaces.
 - A live App Server smoke test can create real local Codex state and is not part
-  of the default test suite. The explicit release smoke passed on Codex
-  0.149.0: one synthetic turn reached `VERIFIED`, while duplicate submit and
-  collect both proved `dispatched=false`. A separate same-App-Server-session
-  active-queue smoke passed on 2026-08-26: server-normalized input identity,
-  automatic queue consumption, exact artifact/readback, and
-  same-process/journal-restart non-dispatch were verified.
+  of the default suite. The stable lifecycle passed on Codex 0.149.0. A
+  historical embedded same-adapter queue smoke also passed, but it did not
+  exercise the public CLI through `codex app-server proxy` and did not prove
+  whether automatic consumption or manual queue start was used.
 - A subsequent independent adversarial review found that one unrelated new turn
   could be accepted if the exact submission disappeared between two protocol
   reads. Resulting turns are now bound only when their user message carries the
   exact queued client ID and normalized-input digest, with a regression proving
   `UNKNOWN`, one enqueue, zero queue-start calls, and no restart dispatch.
-- The final-tree live recheck used one bounded invocation on Codex 0.149.0.
-  Two synthetic owner setups were interrupted before `queue/add`; the third
-  reached authoritative `active/inProgress`, after which exactly one queue
-  submission reached `VERIFIED`. The exact artifact digest matched, while both
-  same-process and journal-restart repeats remained non-dispatch observations.
+- The exact `v0.1.0` managed-daemon queue CLI has not yet received an authorized
+  live qualification. Synthetic tests cover automatic-consume, manual-start,
+  contradictory identity, restart, and queue-reappearance branches; those
+  tests are not a substitute for the exact live release candidate.
 - Active-task queue receipts intentionally use end-state rather than per-turn
   filesystem attribution: their workspace interval includes the selected active
   owner. Exact queued input/turn/result and final checks are enforced, while

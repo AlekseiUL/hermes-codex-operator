@@ -8,7 +8,7 @@ is declared from evidence, not assumed from a product name.
 | Component | Target | Evidence available now | Qualification status |
 |---|---|---|---|
 | Python | 3.11–3.14 | Standard-library runtime; local suite on 3.14; four-version CI matrix defined | CI not yet run publicly |
-| Codex CLI / App Server | 0.149.0 | Generated schemas, scripted protocol/failure suite, and disposable live turn | Qualified on the macOS host listed below |
+| Codex CLI / App Server | 0.149.0 | Generated schemas, scripted protocol/failure suite, and stable-lifecycle live turn | Stable lifecycle qualified on the macOS host; managed-daemon queue CLI live recheck pending |
 | Hermes Agent | 0.20.0 | Isolated discovery and full skill load | Live model/tool run pending |
 | Operating systems | macOS, Linux, Windows | Local macOS tests; three-OS CI matrix defined | Linux/Windows unqualified until CI runs |
 
@@ -36,6 +36,12 @@ only an explicit exact `--experimental-api-version 0.149.0`, initializes with
 report the exact selected version before any queue side effect.
 Unknown server requests and permission broadening fail closed.
 
+The queue CLI also requires `--shared-app-server`. It connects through the
+fixed `codex app-server proxy` command to an already-running managed App Server;
+the owner task must be loaded in that same server. Without the flag, the CLI
+fails before dispatch instead of starting a private App Server that cannot
+prove ownership of another session's active task.
+
 `project/list` is deliberately excluded from the current source. Catalog/read/adopt/watch do
 not call `thread/resume`, `thread/start`, or `turn/start`; they use only
 `thread/list` and authoritative `thread/read`. This read-only surface has
@@ -54,19 +60,20 @@ mutating continuation has been run.
 
 The experimental active-thread queue path is separate from idle continuation,
 catalog, and watch. It requires exact loaded-thread and active-turn ownership,
-persists an immutable SQLite v4 queue baseline before dispatch, enqueues once,
+persists an immutable SQLite v5 queue baseline before dispatch, enqueues once,
 and never treats a lost response or restart as permission to enqueue again.
 Queue inspection is bounded to one page after malformed/lost enqueue delivery;
 an explicit successful-response client, submission, thread, or turn identity
 contradiction fails closed immediately and cannot be replaced by an otherwise
 matching queue/readback candidate. Completion requires a resulting turn whose
 user message matches both the exact queued client ID and normalized-input
-digest, plus authoritative exact-turn readback. Codex 0.149.0 normalizes
-queued text inputs with an empty `text_elements` array and automatically
-consumes an active thread's queued submission shortly after the owner turn
-becomes terminal. The operator polls that authoritative transition before using
-`thread/queue/start` as a bounded fallback. A live mutating queue smoke passed
-on the qualified macOS host, including duplicate and restart non-dispatch.
+digest, plus authoritative exact-turn readback. Codex 0.149.0 normalizes queued
+text inputs with an empty `text_elements` array. The operator supports either
+server-side automatic consumption or a bounded `thread/queue/start` fallback;
+both branches have synthetic coverage. A historical same-adapter live smoke
+proved the basic queue mutation, but it did not exercise the managed-daemon
+proxy CLI and did not record which branch consumed the submission. The current
+release candidate therefore does not claim live qualification for that path.
 
 This experimental path has end-state workspace semantics. Because its baseline
 is captured before the active owner finishes, receipt `changed_paths` cover the
@@ -98,7 +105,8 @@ For every newly supported Codex CLI version:
 3. compare the methods and fields used by the adapter;
 4. run the complete scripted protocol/failure suite;
 5. run the disposable live smoke from `scripts/live_smoke.py`;
-6. for the experimental queue, run `scripts/live_queue_smoke.py`;
+6. explicitly start the managed App Server, then run the actual proxy/CLI queue
+   smoke from `scripts/live_queue_smoke.py`;
 7. repeat the same operation ID and prove `dispatched=false`;
 8. record the result in the table below.
 
@@ -107,6 +115,7 @@ installation and may leave a synthetic thread in local history:
 
 ```bash
 python3 scripts/live_smoke.py --confirm-live-codex
+codex app-server daemon start
 python3 scripts/live_queue_smoke.py --confirm-live-codex --owner-attempts 3
 ```
 
@@ -124,7 +133,8 @@ a newer version pass.
 |---|---|---|---|---|---|
 | 2026-08-25 | macOS 26.5 arm64 | 0.124.0 | — | BLOCKED before dispatch | Host config selected unsupported reasoning value `ultra`; App Server accepts only through `xhigh`; no model turn was created |
 | 2026-08-25 | macOS 26.5 arm64 | 0.149.0 | — | PASS: live operator lifecycle | One synthetic turn reached `VERIFIED`; duplicate submit and collect both returned `dispatched=false`; exact changed path and receipt digests were checked |
-| 2026-08-26 | macOS 26.5 arm64 | 0.149.0 | — | PASS: same-session live active queue | One synthetic active turn and its exact queued turn used one App Server adapter; exact artifact/readback passed; same-process and journal-restart repeats returned `dispatched=false` |
+| 2026-08-26 | macOS 26.5 arm64 | 0.149.0 | — | HISTORICAL PASS: embedded same-adapter queue only | One active and queued turn used one injected adapter; this did not qualify the managed-daemon proxy CLI or prove auto-consume versus manual start |
+| pending exact v0.1.0 commit | macOS | 0.149.0 | — | NOT YET RUN: managed-daemon queue CLI | Must create the owner through the managed daemon, invoke a separate `hermes-codex queue --shared-app-server` process, and prove restart non-dispatch |
 | 2026-08-25 | macOS 26.5 arm64 | — | 0.20.0 | PASS: discovery/load | Isolated Hermes home discovered and loaded the complete external skill; no model call was made |
 
 A full Hermes-model-to-tool-to-Codex conversation remains an unqualified

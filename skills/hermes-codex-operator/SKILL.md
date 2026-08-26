@@ -34,8 +34,9 @@ the operator keeps the handoff and evidence reliable.
 3. Keep the `task_id`, `operation_id`, exact private contract file, journal
    path, and allowed root. The operator retains remote thread/turn identity in
    its private journal and binds it into receipt digests.
-4. Use `status`, `recover`, or `collect` for the same operation. A follow-up in
-   the same Codex context keeps `task_id` and gets a new `operation_id`.
+4. For ordinary submissions, use `status`, `recover`, or `collect` for the same
+   operation. A follow-up in the same Codex context keeps `task_id` and gets a
+   new `operation_id`.
 5. Treat `VERIFIED` as ready. Treat Codex's prose, `TURN_COMPLETED`, or a chat
    notification as progress—not proof.
 
@@ -48,15 +49,22 @@ proves the expected workspace and `idle` state. Use a fresh operation ID and
 invoke it once. Repeating or recovering that operation must remain
 `dispatched=false`; an ambiguous resume/start is `UNKNOWN`, never a retry.
 
-Use `hermes-codex queue` only for an exact active thread proven loaded in the
-same qualified App Server session when the user explicitly selects the
-experimental shared queue and supplies the exact API version `0.149.0`. This is
-not a retry or fallback from `continue`. Missing/ambiguous ownership, queue
+Use `hermes-codex queue --shared-app-server` only after the user explicitly
+starts Codex's managed App Server and the exact active thread is proven loaded
+there. Supply the exact API version `0.149.0`. This is not a retry or fallback
+from `continue`; never invoke queue through a fresh private App Server process.
+Missing/ambiguous ownership, queue
 identity, resulting-turn correlation, or exact completed readback stops as
 `BUSY_UNKNOWN` or `UNKNOWN`; repeat/restart never enqueues again. Requalify
 before using another version. Treat queue `changed_paths` as combined end-state
 evidence across the active owner and queued turn, not per-turn causality; use
 idle `continue` when the user needs isolated file attribution.
+
+Generic `recover` and `collect` never promote an ambiguous queue operation.
+The only simple escape hatch is an explicit user-selected `abandon`; explain
+that it closes local state but does not prove already-dispatched remote work
+stopped. It may close any stuck queue operation or a continuation before exact
+turn correlation. A correlated continuation timeout must use `recover`.
 
 ## Return the result
 

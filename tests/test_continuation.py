@@ -14,17 +14,21 @@ from hermes_codex_operator.adapters.base import (
 )
 from hermes_codex_operator.adapters.fake import FakeBackend, FakeCodexAdapter
 from hermes_codex_operator.continuation import ContinuationOperator, MAX_BASELINE_TURNS
-from hermes_codex_operator.journal import SQLiteJournal
+from hermes_codex_operator.engine import Operator
+from hermes_codex_operator.journal import InvalidTransition, SQLiteJournal
 from hermes_codex_operator.models import OperationState, WorkContract
 from hermes_codex_operator.workspace import WorkspacePolicy
 
 
-def continuation_contract(workspace: Path) -> WorkContract:
+def continuation_contract(
+    workspace: Path,
+    operation_id: str = "synthetic-continuation-001",
+) -> WorkContract:
     return WorkContract.from_dict(
         {
             "schema_version": "1",
             "task_id": "synthetic-existing-task",
-            "operation_id": "synthetic-continuation-001",
+            "operation_id": operation_id,
             "workspace": str(workspace),
             "prompt": "Continue the exact synthetic idle task once.",
             "allowed_change_globs": ["src/**"],
@@ -86,6 +90,39 @@ class ContinuationOperatorTests(unittest.IsolatedAsyncioTestCase):
         baseline = self.journal.get_continuation_baseline(contract.operation_id)
         self.assertEqual(baseline.thread_id, self.thread_id)
         self.assertEqual(baseline.turn_ids, (self.old_turn,))
+
+    async def test_restart_can_abandon_early_continuation_reservation(self) -> None:
+        backend = self.backend()
+        contract = continuation_contract(
+            self.workspace,
+            "continue-crash-after-reserve-001",
+        )
+        self.journal.reserve_operation(contract, dispatch_kind="continue")
+
+        reopened = SQLiteJournal(self.database)
+        try:
+            generic = Operator(
+                reopened,
+                lambda: FakeCodexAdapter(backend),
+                WorkspacePolicy((self.root,)),
+            )
+            abandoned = await generic.abandon(contract)
+            self.assertEqual(abandoned.operation.state, OperationState.FAILED)
+            self.assertEqual(
+                abandoned.operation.failure_code,
+                "operator_abandoned_unrecoverable_operation",
+            )
+            follow_up = continuation_contract(
+                self.workspace,
+                "continue-after-early-abandon-001",
+            )
+            self.assertTrue(
+                reopened.reserve_operation(
+                    follow_up, dispatch_kind="continue"
+                ).created
+            )
+        finally:
+            reopened.close()
 
     async def test_repeat_and_restart_never_dispatch_again(self) -> None:
         backend = self.backend()
@@ -260,6 +297,7 @@ class ContinuationOperatorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unexpected_multiple_new_turns_cannot_be_accepted(self) -> None:
         backend = self.backend()
+        contract = continuation_contract(self.workspace)
 
         class AmbiguousCorrelationAdapter(FakeCodexAdapter):
             async def start_turn(self, thread_id, prompt, options=None):
@@ -268,10 +306,31 @@ class ContinuationOperatorTests(unittest.IsolatedAsyncioTestCase):
                 return turn
 
         outcome = await self.operator(backend, AmbiguousCorrelationAdapter).continue_idle(
-            continuation_contract(self.workspace), thread_id=self.thread_id
+            contract, thread_id=self.thread_id
         )
         self.assertEqual(outcome.operation.state, OperationState.UNKNOWN)
         self.assertEqual(outcome.operation.turn_id, self.new_turn)
+
+        reopened = SQLiteJournal(self.database)
+        try:
+            generic = Operator(
+                reopened,
+                lambda: FakeCodexAdapter(backend),
+                WorkspacePolicy((self.root,)),
+            )
+            abandoned = await generic.abandon(contract)
+            self.assertEqual(abandoned.operation.state, OperationState.FAILED)
+            follow_up = continuation_contract(
+                self.workspace,
+                "continue-after-correlation-abandon-001",
+            )
+            self.assertTrue(
+                reopened.reserve_operation(
+                    follow_up, dispatch_kind="continue"
+                ).created
+            )
+        finally:
+            reopened.close()
 
     async def test_missing_final_readback_fails_closed(self) -> None:
         backend = self.backend(fail_at="readback_missing")
@@ -280,6 +339,33 @@ class ContinuationOperatorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(outcome.operation.state, OperationState.FAILED)
         self.assertEqual(outcome.operation.failure_code, "exact_turn_readback_failed")
+
+    async def test_correlated_continuation_timeout_recovers_without_new_turn(
+        self,
+    ) -> None:
+        backend = self.backend(fail_at="wait_timeout")
+        contract = continuation_contract(self.workspace)
+        first = await self.operator(backend).continue_idle(
+            contract, thread_id=self.thread_id
+        )
+        self.assertEqual(first.operation.state, OperationState.TIMED_OUT)
+        self.assertEqual(first.operation.dispatch_kind, "continue")
+
+        backend.fail_at = None
+        generic = Operator(
+            self.journal,
+            lambda: FakeCodexAdapter(backend),
+            WorkspacePolicy((self.root,)),
+        )
+        with self.assertRaises(InvalidTransition):
+            await generic.abandon(contract)
+        recovered = await generic.recover(contract)
+
+        self.assertEqual(recovered.operation.state, OperationState.VERIFIED)
+        self.assertFalse(recovered.dispatched)
+        self.assertEqual(backend.start_turn_calls, 1)
+        self.assertEqual(backend.resume_thread_calls, 2)
+        self.assertEqual(backend.read_turn_calls, 1)
 
     async def test_two_process_guard_has_one_dispatch_owner(self) -> None:
         started = asyncio.Event()

@@ -21,6 +21,7 @@ import threading
 from typing import Any, Iterator, Mapping
 
 from .models import (
+    ACTIVE_STATES,
     ContractValidationError,
     OperationState,
     Receipt,
@@ -34,7 +35,8 @@ from .models import (
 from .workspace import WorkspaceSnapshot, snapshot_from_dict, snapshot_to_dict
 
 
-DATABASE_VERSION = 4
+DATABASE_VERSION = 5
+DISPATCH_KINDS = frozenset({"ordinary", "continue", "queue"})
 WATCH_STATES = frozenset({"ACTIVE", "COMPLETED", "FAILED", "INTERRUPTED", "UNKNOWN"})
 WATCH_TERMINAL_STATES = WATCH_STATES - {"ACTIVE"}
 
@@ -101,6 +103,7 @@ class OperationRecord:
     operation_id: str
     prompt_sha256: str
     contract_sha256: str
+    dispatch_kind: str
     state: OperationState
     turn_id: str | None
     failure_code: str | None
@@ -264,7 +267,7 @@ class SQLiteJournal:
             version = int(
                 self._connection.execute("PRAGMA user_version").fetchone()[0]
             )
-            if version not in (0, 1, 2, 3, DATABASE_VERSION):
+            if version not in (0, 1, 2, 3, 4, DATABASE_VERSION):
                 raise JournalError("unsupported journal schema version")
             self._connection.execute(
                 """
@@ -285,6 +288,8 @@ class SQLiteJournal:
                     prompt_sha256 TEXT NOT NULL CHECK(length(prompt_sha256) = 64),
                     contract_sha256 TEXT NOT NULL CHECK(length(contract_sha256) = 64),
                     contract_json TEXT NOT NULL,
+                    dispatch_kind TEXT NOT NULL DEFAULT 'ordinary'
+                        CHECK(dispatch_kind IN ('ordinary', 'continue', 'queue')),
                     state TEXT NOT NULL,
                     turn_id TEXT UNIQUE,
                     failure_code TEXT,
@@ -293,6 +298,20 @@ class SQLiteJournal:
                 )
                 """
             )
+            operation_columns = {
+                row[1]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(operations)"
+                ).fetchall()
+            }
+            if "dispatch_kind" not in operation_columns:
+                self._connection.execute(
+                    """
+                    ALTER TABLE operations ADD COLUMN dispatch_kind TEXT NOT NULL
+                    DEFAULT 'ordinary'
+                    CHECK(dispatch_kind IN ('ordinary', 'continue', 'queue'))
+                    """
+                )
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS receipts (
@@ -427,6 +446,33 @@ class SQLiteJournal:
                 )
                 """
             )
+            if version in (0, 1, 2, 3, 4):
+                self._connection.execute(
+                    """
+                    UPDATE operations SET dispatch_kind = 'continue'
+                    WHERE operation_id IN (
+                        SELECT operation_id FROM continuation_baselines
+                    )
+                    """
+                )
+                self._connection.execute(
+                    """
+                    UPDATE operations SET dispatch_kind = 'queue'
+                    WHERE operation_id IN (
+                        SELECT operation_id FROM queue_baselines
+                    )
+                    """
+                )
+            self._connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS operations_dispatch_kind_is_immutable
+                BEFORE UPDATE OF dispatch_kind ON operations
+                WHEN OLD.dispatch_kind != NEW.dispatch_kind
+                BEGIN
+                    SELECT RAISE(ABORT, 'operation dispatch kind is immutable');
+                END
+                """
+            )
             self._connection.execute(
                 """
                 CREATE TRIGGER IF NOT EXISTS queue_baselines_identity_is_immutable
@@ -468,7 +514,7 @@ class SQLiteJournal:
                 raise JournalError(
                     "journal already contains multiple open operations for one task"
                 ) from exc
-            if version in (0, 1, 2, 3):
+            if version in (0, 1, 2, 3, 4):
                 self._connection.execute(f"PRAGMA user_version = {DATABASE_VERSION}")
 
     def _tighten_permissions(self) -> None:
@@ -520,11 +566,15 @@ class SQLiteJournal:
             state = OperationState(row["state"])
         except ValueError as exc:
             raise JournalError("journal contains an unknown operation state") from exc
+        dispatch_kind = row["dispatch_kind"]
+        if dispatch_kind not in DISPATCH_KINDS:
+            raise JournalError("journal contains an unknown dispatch kind")
         return OperationRecord(
             task_id=row["task_id"],
             operation_id=row["operation_id"],
             prompt_sha256=row["prompt_sha256"],
             contract_sha256=row["contract_sha256"],
+            dispatch_kind=dispatch_kind,
             state=state,
             turn_id=row["turn_id"],
             failure_code=row["failure_code"],
@@ -542,7 +592,12 @@ class SQLiteJournal:
             "SELECT * FROM operations WHERE operation_id = ?", (operation_id,)
         ).fetchone()
 
-    def reserve_operation(self, contract: WorkContract) -> Reservation:
+    def reserve_operation(
+        self,
+        contract: WorkContract,
+        *,
+        dispatch_kind: str | None = "ordinary",
+    ) -> Reservation:
         """Atomically reserve an operation, or return its existing record.
 
         Reuse is idempotent only when the complete redacted contract matches.
@@ -551,6 +606,9 @@ class SQLiteJournal:
 
         if not isinstance(contract, WorkContract):
             raise TypeError("contract must be a WorkContract")
+        if dispatch_kind is not None and dispatch_kind not in DISPATCH_KINDS:
+            raise ValueError("dispatch_kind is invalid")
+        requested_kind = dispatch_kind or "ordinary"
         persisted = contract.persistence_dict()
         contract_json = canonical_json(persisted)
         contract_sha256 = sha256_text(contract_json)
@@ -564,6 +622,10 @@ class SQLiteJournal:
                     operation_row["task_id"] != contract.task_id
                     or operation_row["prompt_sha256"] != prompt_sha256
                     or operation_row["contract_sha256"] != contract_sha256
+                    or (
+                        dispatch_kind is not None
+                        and operation_row["dispatch_kind"] != dispatch_kind
+                    )
                 ):
                     raise IdempotencyConflict(
                         "operation_id is already reserved for different content"
@@ -613,9 +675,9 @@ class SQLiteJournal:
                     """
                     INSERT INTO operations(
                         operation_id, task_id, prompt_sha256, contract_sha256,
-                        contract_json, state, turn_id, failure_code,
+                        contract_json, dispatch_kind, state, turn_id, failure_code,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
                     """,
                     (
                         contract.operation_id,
@@ -623,6 +685,7 @@ class SQLiteJournal:
                         prompt_sha256,
                         contract_sha256,
                         contract_json,
+                        requested_kind,
                         OperationState.QUEUED.value,
                         now,
                         now,
@@ -1182,11 +1245,14 @@ class SQLiteJournal:
     def abandon_unrecoverable(
         self, operation_id: str, receipt: Receipt | Mapping[str, Any]
     ) -> Finalization:
-        """Explicitly close an ambiguous operation that lacks exact IDs.
+        """Explicitly close an open operation that generic recovery cannot resolve.
 
-        This is never called automatically. If both thread and turn identities
-        exist, authoritative recovery is still possible and abandonment is
-        rejected.
+        This is never called automatically. Ordinary operations with exact
+        thread and turn identities must still use authoritative recovery.
+        Queue operations may be closed from any open state because their
+        stronger correlation contract deliberately blocks generic recovery.
+        Continuations may be closed only before authoritative correlation;
+        correlated continuation timeouts must be recovered.
         """
 
         return self._finalize(operation_id, receipt, mode="abandon")
@@ -1235,18 +1301,42 @@ class SQLiteJournal:
                             "reconciliation requires exact thread and turn IDs"
                         )
                 else:
-                    if current not in {OperationState.UNKNOWN, OperationState.TIMED_OUT}:
+                    exact_turn = (
+                        task["thread_id"] is not None
+                        and row["turn_id"] is not None
+                    )
+                    ambiguous = current in {
+                        OperationState.UNKNOWN,
+                        OperationState.TIMED_OUT,
+                    }
+                    queue_open = (
+                        row["dispatch_kind"] == "queue"
+                        and (current in ACTIVE_STATES or ambiguous)
+                    )
+                    continuation_unrecoverable = (
+                        row["dispatch_kind"] == "continue"
+                        and current
+                        in {
+                            OperationState.QUEUED,
+                            OperationState.READY,
+                            OperationState.DISPATCHING,
+                            OperationState.UNKNOWN,
+                        }
+                    )
+                    identityless_ambiguity = ambiguous and not exact_turn
+                    if not (
+                        queue_open
+                        or continuation_unrecoverable
+                        or identityless_ambiguity
+                    ):
                         raise InvalidTransition(
-                            "only UNKNOWN or TIMED_OUT can be abandoned"
+                            "operation has an authoritative recovery path or "
+                            "is not open"
                         )
                     if target != OperationState.FAILED or code != (
                         "operator_abandoned_unrecoverable_operation"
                     ):
                         raise InvalidTransition("abandonment receipt has invalid outcome")
-                    if task["thread_id"] is not None and row["turn_id"] is not None:
-                        raise InvalidTransition(
-                            "exact identities exist; recover the operation"
-                        )
 
                 self._require_identity_for_target(row, target)
                 self._connection.execute(

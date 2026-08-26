@@ -104,6 +104,12 @@ not a retry or fallback from `continue` and currently accepts only
 side effects, and initialized App Server runtime evidence must report the same
 exact version.
 
+The public CLI additionally requires `--shared-app-server`. The user must
+explicitly start Codex's managed App Server first; the active owner and the
+queue client must use that same server. The flag selects the fixed
+`codex app-server proxy` argv, not an arbitrary command. A fresh App Server
+process cannot satisfy ownership for another session's active task.
+
 Before enqueue, the operator proves one exact loaded owner plus one active turn,
 binds the thread/workspace, and stores the contract-message hash and complete
 baseline turn-set digest. It then persists `QUEUE_DISPATCH_IN_FLIGHT`, enqueues
@@ -118,9 +124,15 @@ is only a fallback while the exact submission remains queued. The resulting
 turn must contain the exact queued client-message ID and normalized-input
 digest before binding, then reach completed authoritative readback with a final
 result before verification.
-Repeat or restart only observes durable state with `dispatched=false`. A live
-queue mutation passed on the qualified 0.149.0 macOS host; other versions need
-separate qualification and approval.
+Repeat or restart only observes durable state with `dispatched=false`. The
+managed-daemon CLI path has synthetic coverage and must pass the explicit live
+smoke on the exact release commit; other versions need separate qualification
+and approval.
+
+For any stuck queue state, generic `recover` and `collect` only observe durable
+state; they cannot reclassify the bound turn as successful. A human may
+explicitly run `abandon` to close the local operation and allow a later one.
+That action is not evidence that a queued or running remote turn was cancelled.
 
 `queue` proves the exact queued message, resulting turn, completed result, and
 declared final workspace checks. It does not provide per-turn filesystem
@@ -133,8 +145,11 @@ An unsupported server approval request fails closed instead of silently
 broadening permissions. A future interactive approval adapter requires a new
 protocol version rather than an unused v1 state.
 
-`abandon` is a deliberate human closure for an identity-less ambiguity. It is
-not an automatic retry mechanism.
+`abandon` is a deliberate human closure for an identity-less ordinary
+ambiguity, any open queue operation, or a continuation that failed before
+authoritative turn correlation. A correlated continuation timeout must be
+recovered. Abandonment is not an automatic retry or remote-cancellation
+mechanism.
 
 ## User-facing completion message
 

@@ -82,7 +82,12 @@ class Operator:
         return self.journal.get_operation(operation_id)
 
     async def submit(self, contract: WorkContract) -> OperatorOutcome:
-        reservation = self.journal.reserve_operation(contract)
+        # A new generic submission defaults to ``ordinary``.  For an existing
+        # operation, ``None`` observes its durable kind so submit cannot turn
+        # an early queue/continue reservation into another dispatch mode.
+        reservation = self.journal.reserve_operation(
+            contract, dispatch_kind=None
+        )
         with self.journal.operation_guard(contract.operation_id) as owned:
             if not owned:
                 return self._observe_existing(contract)
@@ -109,7 +114,7 @@ class Operator:
         except RecordNotFound:
             raise RecordNotFound("cannot recover an operation that was never reserved")
         # Re-run the full idempotency comparison without creating a new record.
-        self.journal.reserve_operation(contract)
+        self.journal.reserve_operation(contract, dispatch_kind=None)
         with self.journal.operation_guard(contract.operation_id) as owned:
             if not owned:
                 return self._observe_existing(contract)
@@ -122,15 +127,21 @@ class Operator:
             )
 
     async def abandon(self, contract: WorkContract) -> OperatorOutcome:
-        """Explicitly close an ambiguity that cannot be authoritatively recovered."""
+        """Explicitly close local state when authoritative recovery is unavailable."""
 
         try:
             self.journal.get_operation(contract.operation_id)
         except RecordNotFound:
             raise RecordNotFound("cannot abandon an operation that was never reserved")
-        self.journal.reserve_operation(contract)
+        self.journal.reserve_operation(contract, dispatch_kind=None)
         with self.journal.operation_guard(contract.operation_id) as owned:
             if not owned:
+                return self._observe_existing(contract)
+            operation = self.journal.get_operation(contract.operation_id)
+            if operation.state in DELIVERABLE_STATES - {
+                OperationState.UNKNOWN,
+                OperationState.TIMED_OUT,
+            }:
                 return self._observe_existing(contract)
             return self._finalize_outcome(
                 contract,
@@ -194,14 +205,22 @@ class Operator:
         allow_dispatch: bool = True,
         recover_ambiguous: bool = False,
     ) -> OperatorOutcome:
-        try:
-            self.journal.get_queue_baseline(contract.operation_id)
-        except RecordNotFound:
-            pass
-        else:
-            # Queue correlation has stronger identity requirements than the
-            # generic submit/recover path. Never let a generic lifecycle
-            # command reinterpret an ambiguous queued turn as verified.
+        if operation.dispatch_kind == "queue":
+            # Queue correlation is stronger than generic exact-turn recovery.
+            return self._observe_existing(contract)
+        if (
+            operation.dispatch_kind == "continue"
+            and operation.state
+            not in {
+                OperationState.RUNNING,
+                OperationState.TIMED_OUT,
+                OperationState.TURN_COMPLETED,
+                OperationState.VERIFYING,
+            }
+        ):
+            # RUNNING is persisted only after the continuation baseline has
+            # authoritatively correlated the one returned turn. Earlier or
+            # ambiguous states are observation-only and never redispatched.
             return self._observe_existing(contract)
 
         if recover_ambiguous and operation.state in {
