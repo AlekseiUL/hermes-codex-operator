@@ -24,9 +24,9 @@ human review, or a guarantee that model-generated code is correct.
 
 ## Evidence snapshot
 
-The public runtime source was qualified on 2026-08-26 with:
+The current public candidate was qualified on 2026-08-26 with:
 
-- 197 runtime unit and protocol tests;
+- 203 unit, protocol, and documentation-gate tests;
 - Python 3.11, 3.12, 3.13, and 3.14;
 - Linux, macOS, and Windows CI runners;
 - a package smoke that built, normalized, scanned, installed, and exercised both
@@ -36,12 +36,8 @@ The public runtime source was qualified on 2026-08-26 with:
   submission and proved restart did not dispatch again;
 - a fresh public-clone history scan and installation smoke.
 
-This documentation-hardening candidate adds six docs-gate tests. Its complete
-local suite is 203 tests; public matrix evidence for the candidate remains a
-merge prerequisite, not a completed claim.
-
-The final 13-job public CI run for the promoted runtime tree is
-[GitHub Actions run 32988655016](https://github.com/AlekseiUL/hermes-codex-operator/actions/runs/32988655016).
+The 13-job public CI run for this candidate is
+[GitHub Actions run 32997466917](https://github.com/AlekseiUL/hermes-codex-operator/actions/runs/32997466917).
 The live queue smoke ran against runtime source commit `1bfe767`; the promoted
 main commit `366735a` had the same source tree. Documentation-only commits do
 not extend that live qualification to a different Codex version or runtime

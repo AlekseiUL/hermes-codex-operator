@@ -9,7 +9,7 @@ name or a passing test on another platform.
 | Component | Declared target | Verified evidence | Honest boundary |
 |---|---|---|---|
 | Python | 3.11–3.14 | Public CI passed on all four versions | Python 3.15 and later are rejected by `doctor` and package metadata |
-| Operating systems | Linux, macOS, Windows | The 197-test runtime suite passed on all three CI runner families; the current 203-test docs candidate passed locally on macOS | Candidate CI remains required; live Codex smokes were run only on macOS arm64 |
+| Operating systems | Linux, macOS, Windows | The 203-test suite passed on all three public CI runner families | Live Codex smokes were run only on macOS arm64 |
 | Codex CLI / App Server | `0.149.0` | Generated schemas, protocol/failure suite, live ordinary lifecycle, and live managed-daemon queue smoke | Queue support is experimental and exact-version only |
 | Hermes Agent | `0.20.0` evidence baseline | Isolated discovery and complete skill load passed | No full Hermes-model → operator → Codex conversation is claimed yet |
 | Package | Python package plus `websockets==15.0.1` | sdist and wheel build, privacy scan, clean install, import, and CLI smoke passed | The wheel contains the core CLI; install the repository skill separately |

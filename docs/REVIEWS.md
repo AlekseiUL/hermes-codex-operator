@@ -12,9 +12,9 @@ qualifies only the exact platform, Codex version, and protocol surface named.
 
 ## Current release verdict
 
-The runtime source promoted to public `main` passed the bounded release gate:
+The current documentation-hardening candidate passed the bounded release gate:
 
-- 197 runtime unit and protocol tests in the public matrix;
+- 203 unit, protocol, and documentation-gate tests in the public matrix;
 - Python 3.11–3.14 on Linux, macOS, and Windows;
 - Ruff, Pyright, compilation, diff-integrity, and Git-integrity checks;
 - tree, staged, reachable-history, sdist, and wheel privacy scans;
@@ -24,11 +24,8 @@ The runtime source promoted to public `main` passed the bounded release gate:
   `dispatched=false`;
 - fresh public-clone privacy and installation smoke.
 
-The documentation-hardening candidate adds six docs-gate tests and passes 203
-tests locally. Candidate matrix CI remains required before merge.
-
 Verdict: no known source, packaging, or reachable-history blocker for the
-current public runtime tree. The project remains pre-alpha because App Server
+current candidate. The project remains pre-alpha because App Server
 and queue transport are experimental and several integrations are intentionally
 unqualified.
 
