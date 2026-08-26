@@ -198,7 +198,9 @@ def main() -> None:
         wait_until_killed()
 
     expected_thread_method = (
-        "thread/resume" if SCENARIO in {"resume", "resume_read_only"} else "thread/start"
+        "thread/resume"
+        if SCENARIO in {"resume", "resume_read_only", "resume_timeout"}
+        else "thread/start"
     )
     thread_request = expect(expected_thread_method)
     thread_params = thread_request["params"]
@@ -211,6 +213,8 @@ def main() -> None:
     if expected_thread_method == "thread/resume":
         assert thread_params["threadId"] == THREAD_ID
     workspace = thread_params["cwd"]
+    if SCENARIO == "resume_timeout":
+        wait_until_killed()
     sandbox_type = {
         "read-only": "readOnly",
         "workspace-write": "workspaceWrite",

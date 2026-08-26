@@ -241,6 +241,52 @@ class CliTests(unittest.TestCase):
             self.assertEqual(backend.start_turn_calls, 0)
             self.assertEqual(backend.read_thread_calls, 2)
 
+    def test_continue_cli_is_distinct_and_duplicate_is_not_dispatched(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            workspace = root_path / "workspace"
+            (workspace / "src").mkdir(parents=True)
+            contract = root_path / "contract.json"
+            contract.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1",
+                        "task_id": "existing-task",
+                        "operation_id": "continuation-001",
+                        "workspace": str(workspace),
+                        "prompt": "Continue the synthetic task once.",
+                        "allowed_change_globs": ["src/**"],
+                        "verification": [[sys.executable, "-c", "raise SystemExit(0)"]],
+                        "timeout_seconds": 5,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = root_path / "state.sqlite3"
+            backend = FakeBackend(
+                thread_id="thread-existing",
+                turn_id="turn-new",
+            )
+            backend.threads[backend.thread_id] = workspace
+            backend.turns[(backend.thread_id, "turn-old")] = "completed"
+            command = [
+                "--state", str(state), "continue", "--json",
+                "--contract", str(contract), "--thread-id", backend.thread_id,
+                "--allow-root", str(root_path),
+            ]
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(command, adapter_factory=lambda: FakeCodexAdapter(backend))
+            self.assertEqual(code, 0)
+            self.assertTrue(json.loads(output.getvalue())["dispatched"])
+
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(command, adapter_factory=lambda: FakeCodexAdapter(backend))
+            self.assertEqual(code, 0)
+            self.assertFalse(json.loads(output.getvalue())["dispatched"])
+            self.assertEqual(backend.start_turn_calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

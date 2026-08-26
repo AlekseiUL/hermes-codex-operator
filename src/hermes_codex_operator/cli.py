@@ -12,6 +12,7 @@ from typing import Sequence
 from .adapters.app_server import AppServerAdapter
 from .adapters.base import AdapterError, CodexAdapter
 from .catalog import CatalogOperator
+from .continuation import ContinuationOperator
 from .engine import AdapterFactory, Operator, OperatorOutcome
 from .journal import CompletionEvent, JournalError, SQLiteJournal, WatchRecord
 from .models import ContractValidationError, WorkContract, sha256_text
@@ -54,6 +55,22 @@ def _parser() -> argparse.ArgumentParser:
             default=[],
             help="allowed workspace root; repeatable; defaults to current directory",
         )
+
+    continuation = commands.add_parser(
+        "continue", help="continue one exact existing idle thread at most once"
+    )
+    continuation.add_argument(
+        "--json", dest="command_json", action="store_true", help=argparse.SUPPRESS
+    )
+    continuation.add_argument("--contract", required=True, help="JSON file or - for stdin")
+    continuation.add_argument("--thread-id", required=True, help="exact existing thread ID")
+    continuation.add_argument(
+        "--allow-root",
+        type=Path,
+        action="append",
+        default=[],
+        help="allowed workspace root; repeatable; defaults to current directory",
+    )
 
     status = commands.add_parser("status", help="read local operation state")
     status.add_argument(
@@ -326,7 +343,13 @@ def main(
                 policy = WorkspacePolicy(tuple(Path(root).resolve() for root in roots))
                 factory = adapter_factory or (lambda: AppServerAdapter())
                 operator = Operator(journal, factory, policy)
-                if args.command == "submit":
+                if args.command == "continue":
+                    outcome = asyncio.run(
+                        ContinuationOperator(journal, factory, policy).continue_idle(
+                            contract, thread_id=args.thread_id
+                        )
+                    )
+                elif args.command == "submit":
                     outcome = asyncio.run(operator.submit(contract))
                 elif args.command == "collect":
                     outcome = asyncio.run(operator.collect(contract))

@@ -285,7 +285,9 @@ class AppServerAdapter:
         result = await self._request(
             "thread/resume",
             params,
-            side_effect=False,
+            # Resuming is part of the continuation mutation boundary. A lost
+            # response is delivery-ambiguous and must never be retried.
+            side_effect=True,
         )
         actual = self._validate_thread_result(
             result,

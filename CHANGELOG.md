@@ -6,6 +6,21 @@ All notable changes to this project will be documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Distinct `continue --thread-id` mutation for one exact existing idle task.
+- Immutable SQLite v3 continuation baselines containing only exact turn IDs and
+  their digest; atomic v1/v2 migration remains backward compatible.
+- Exact workspace/idle preflight, one-turn post-dispatch correlation, restart
+  idempotency, and two-process reservation coverage.
+
+### Security
+
+- Resume/start delivery ambiguity becomes `UNKNOWN` and is never automatically
+  resubmitted. Catalog/read/adopt/watch/events remain strictly read-only.
+- Project/queue APIs and experimental capabilities remain disabled; no raw
+  prompt or result was added to continuation journal rows.
+
 ## [0.1.0] - 2026-08-26
 
 ### Added

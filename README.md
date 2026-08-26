@@ -103,7 +103,8 @@ transport-neutral local outbox. Delivery remains the host application's job.
 | Capability | v0.1.0 status |
 |---|---|
 | Clarify an idea; propose architecture, options, decomposition, and acceptance criteria | Included in the Hermes skill |
-| Start a new Codex task or continue the same task context | Implemented in the core |
+| Start a new Codex task | Implemented in the core |
+| Continue one exact existing idle task once | Implemented as the explicit `continue` command |
 | Wait for the exact turn, read it authoritatively, and return the result | Implemented in the core |
 | Verify changed-file scope and argv-only checks | Implemented in the core |
 | Durable status, conservative recovery, immutable receipts | Implemented in the core |
@@ -204,6 +205,27 @@ outbox themselves.
 
 For a follow-up, keep `task_id` and use a new `operation_id`. That resumes the
 same Codex thread. Never reuse an operation ID with different instructions.
+
+To continue a task discovered outside this journal, pin the exact idle thread
+and expected workspace in a private WorkContract, then invoke the distinct
+mutation command once:
+
+```bash
+hermes-codex continue \
+  --contract work-contract.json \
+  --thread-id THREAD_ID \
+  --allow-root /absolute/path/to/projects \
+  --json
+```
+
+`continue` first reserves the operation, reads and verifies the exact idle
+thread/workspace, and persists the complete baseline turn-ID set. Only then may
+it issue one `thread/resume` and one `turn/start`. The returned turn must be the
+only new turn and is bound atomically. A lost, malformed, mismatched, or
+ambiguous resume/start result becomes `UNKNOWN`; repeating the same operation
+returns `dispatched=false` and never submits again. Raw final text is returned
+only by this explicit mutation invocation or the existing explicit `collect`
+and `catalog read --include-result` surfaces.
 
 For lifecycle commands, JSON `ok` means the operation is `VERIFIED`. `status`
 still exits `0` when it successfully reads a non-verified record, so automation

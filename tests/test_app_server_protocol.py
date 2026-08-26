@@ -81,6 +81,17 @@ class AppServerProtocolTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await adapter.close()
 
+    async def test_resume_timeout_is_delivery_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_name:
+            adapter = self.adapter("resume_timeout", request_timeout=0.15)
+            try:
+                with self.assertRaises(DeliveryUnknown) as caught:
+                    await adapter.resume_thread(THREAD_ID, Path(workspace_name))
+                self.assertEqual(caught.exception.method, "thread/resume")
+                self.assertTrue(caught.exception.sent)
+            finally:
+                await adapter.close()
+
     async def test_catalog_paginates_with_strict_read_only_protocol(self) -> None:
         adapter = self.adapter("catalog_pages")
         try:

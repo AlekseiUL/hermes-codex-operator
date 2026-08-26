@@ -37,6 +37,15 @@ not call `thread/resume`, `thread/start`, or `turn/start`; they use only
 synthetic protocol coverage and a bounded read-only live smoke proving that
 catalog/read/adopt leaves the exact turn set unchanged.
 
+The explicit `continue` command is the only new mutation surface in the current
+unreleased slice. It requires exact `thread/read` workspace and idle-state
+proof, stores a bounded immutable turn-ID baseline, then allows exactly one
+`thread/resume` and one `turn/start`. It does not use project or queue APIs.
+`thread/resume` is treated as delivery-affecting for timeout/cancellation
+purposes: an unconfirmed response is `UNKNOWN` and is never auto-resubmitted.
+This path currently has synthetic protocol/failure qualification only; no live
+mutating continuation has been run.
+
 The official App Server documentation states that stdio uses newline-delimited
 JSON, requires the initialization handshake, and models conversation as
 threads containing turns and items. See

@@ -42,6 +42,12 @@ the operator keeps the handoff and evidence reliable.
 Never retry `UNKNOWN` or `TIMED_OUT` by submitting another turn. Reconcile the
 exact operation. If identity is missing, stop and explain the ambiguity.
 
+For an exact existing task discovered through `catalog read`, use the distinct
+`hermes-codex continue --thread-id THREAD_ID` mutation only when the readback
+proves the expected workspace and `idle` state. Use a fresh operation ID and
+invoke it once. Repeating or recovering that operation must remain
+`dispatched=false`; an ambiguous resume/start is `UNKNOWN`, never a retry.
+
 ## Return the result
 
 Report one compact message through the user's current Hermes channel:
@@ -58,7 +64,8 @@ only with explicit `--include-result`, and adopt only an exact `threadId` plus
 `turnId`. `adopt` and `watch` are read-only and
 write completion digests to a local event outbox; they do not deliver messages
 or run in the background. Do not claim that this skill can create a Codex
-Desktop project or provide a daemon or crash-independent push notification.
+Desktop project, infer project identity, or provide a daemon or
+crash-independent push notification.
 
 Before constructing a contract or handling a non-success status, read
 [the operator protocol](references/operator-protocol.md).

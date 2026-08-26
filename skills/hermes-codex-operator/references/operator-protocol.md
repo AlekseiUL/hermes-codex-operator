@@ -80,6 +80,21 @@ content is an idempotency conflict.
 - `FAILED` or `CANCELLED`: report the recorded failure and evidence without
   converting it into a success narrative.
 
+## Existing idle task continuation
+
+`continue` is a distinct mutation, not a catalog/watch mode. It requires an
+exact `thread_id`, a private WorkContract whose workspace exactly matches the
+authoritative idle thread, and a fresh operation ID. The journal reserves that
+operation and stores the bounded exact baseline turn-ID set before issuing one
+`thread/resume` followed by one `turn/start`. The returned turn ID must be the
+only addition to the authoritative set.
+
+Any lost, malformed, mismatched, or ambiguous resume/start delivery is
+`UNKNOWN`. Repeating the same operation observes durable state with
+`dispatched=false`; it never retries. Only the exact bound turn may be waited
+for, read, verified, collected, or reconciled. Project inference, queues, and
+Desktop UI automation are not part of this protocol.
+
 An unsupported server approval request fails closed instead of silently
 broadening permissions. A future interactive approval adapter requires a new
 protocol version rather than an unused v1 state.

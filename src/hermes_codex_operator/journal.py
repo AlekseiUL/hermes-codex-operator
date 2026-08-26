@@ -34,7 +34,7 @@ from .models import (
 from .workspace import WorkspaceSnapshot, snapshot_from_dict, snapshot_to_dict
 
 
-DATABASE_VERSION = 2
+DATABASE_VERSION = 3
 WATCH_STATES = frozenset({"ACTIVE", "COMPLETED", "FAILED", "INTERRUPTED", "UNKNOWN"})
 WATCH_TERMINAL_STATES = WATCH_STATES - {"ACTIVE"}
 
@@ -145,6 +145,15 @@ class CompletionEvent:
     acked_at: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class ContinuationBaseline:
+    operation_id: str
+    thread_id: str
+    turn_ids: tuple[str, ...]
+    turn_ids_sha256: str
+    created_at: str
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
         "+00:00", "Z"
@@ -244,7 +253,7 @@ class SQLiteJournal:
             version = int(
                 self._connection.execute("PRAGMA user_version").fetchone()[0]
             )
-            if version not in (0, 1, DATABASE_VERSION):
+            if version not in (0, 1, 2, DATABASE_VERSION):
                 raise JournalError("unsupported journal schema version")
             self._connection.execute(
                 """
@@ -365,6 +374,35 @@ class SQLiteJournal:
                 "CREATE INDEX IF NOT EXISTS completion_events_ack_idx "
                 "ON completion_events(acked_at, created_at)"
             )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS continuation_baselines (
+                    operation_id TEXT PRIMARY KEY REFERENCES operations(operation_id),
+                    thread_id TEXT NOT NULL,
+                    turn_ids_sha256 TEXT NOT NULL CHECK(length(turn_ids_sha256) = 64),
+                    turn_ids_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS continuation_baselines_are_immutable_on_update
+                BEFORE UPDATE ON continuation_baselines
+                BEGIN
+                    SELECT RAISE(ABORT, 'continuation baselines are immutable');
+                END
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS continuation_baselines_are_immutable_on_delete
+                BEFORE DELETE ON continuation_baselines
+                BEGIN
+                    SELECT RAISE(ABORT, 'continuation baselines are immutable');
+                END
+                """
+            )
             try:
                 self._connection.execute(
                     """
@@ -381,7 +419,7 @@ class SQLiteJournal:
                 raise JournalError(
                     "journal already contains multiple open operations for one task"
                 ) from exc
-            if version in (0, 1):
+            if version in (0, 1, 2):
                 self._connection.execute(f"PRAGMA user_version = {DATABASE_VERSION}")
 
     def _tighten_permissions(self) -> None:
@@ -556,6 +594,95 @@ class SQLiteJournal:
         return result
 
     reserve = reserve_operation
+
+    def store_continuation_baseline(
+        self, operation_id: str, thread_id: str, turn_ids: tuple[str, ...]
+    ) -> ContinuationBaseline:
+        """Persist the exact pre-dispatch remote turn set once and immutably."""
+
+        validate_external_id(thread_id, "thread_id")
+        if not isinstance(turn_ids, tuple) or len(turn_ids) > 1000:
+            raise JournalError("continuation baseline turn set is invalid or oversized")
+        for turn_id in turn_ids:
+            validate_external_id(turn_id, "turn_id")
+        if len(set(turn_ids)) != len(turn_ids):
+            raise JournalError("continuation baseline contains duplicate turn ids")
+        ordered = tuple(sorted(turn_ids))
+        payload = canonical_json({"turn_ids": list(ordered)})
+        digest = sha256_text(payload)
+        with self._transaction():
+            operation = self._select_operation(operation_id)
+            if operation is None:
+                raise RecordNotFound("operation does not exist")
+            task = self._select_task(operation["task_id"])
+            if task is None or task["thread_id"] != thread_id:
+                raise BindingConflict("continuation thread is not bound to the operation task")
+            existing = self._connection.execute(
+                "SELECT * FROM continuation_baselines WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["thread_id"] != thread_id
+                    or existing["turn_ids_sha256"] != digest
+                    or existing["turn_ids_json"] != payload
+                ):
+                    raise BaselineConflict("continuation baseline is immutable")
+                return self._continuation_baseline_from_row(existing)
+            now = _utc_now()
+            self._connection.execute(
+                """
+                INSERT INTO continuation_baselines(
+                    operation_id, thread_id, turn_ids_sha256, turn_ids_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (operation_id, thread_id, digest, payload, now),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM continuation_baselines WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            assert row is not None
+            return self._continuation_baseline_from_row(row)
+
+    @staticmethod
+    def _continuation_baseline_from_row(row: sqlite3.Row) -> ContinuationBaseline:
+        try:
+            value = json.loads(row["turn_ids_json"])
+            if not isinstance(value, dict) or set(value) != {"turn_ids"}:
+                raise TypeError
+            raw_ids = value["turn_ids"]
+            if not isinstance(raw_ids, list) or len(raw_ids) > 1000:
+                raise TypeError
+            turn_ids = tuple(raw_ids)
+            for turn_id in turn_ids:
+                validate_external_id(turn_id, "turn_id")
+            if len(set(turn_ids)) != len(turn_ids) or turn_ids != tuple(sorted(turn_ids)):
+                raise TypeError
+        except (ContractValidationError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            raise JournalError("continuation baseline is malformed") from exc
+        if canonical_json({"turn_ids": list(turn_ids)}) != row["turn_ids_json"]:
+            raise JournalError("continuation baseline encoding is non-canonical")
+        if sha256_text(row["turn_ids_json"]) != row["turn_ids_sha256"]:
+            raise JournalError("continuation baseline digest mismatch")
+        return ContinuationBaseline(
+            operation_id=row["operation_id"],
+            thread_id=row["thread_id"],
+            turn_ids=turn_ids,
+            turn_ids_sha256=row["turn_ids_sha256"],
+            created_at=row["created_at"],
+        )
+
+    def get_continuation_baseline(self, operation_id: str) -> ContinuationBaseline:
+        with self._lock:
+            self._ensure_open()
+            row = self._connection.execute(
+                "SELECT * FROM continuation_baselines WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("continuation baseline does not exist")
+            return self._continuation_baseline_from_row(row)
 
     def get_task(self, task_id: str) -> TaskRecord:
         with self._lock:
