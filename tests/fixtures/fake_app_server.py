@@ -145,6 +145,9 @@ def main() -> None:
     assert initialize["params"]["clientInfo"]["name"] == "hermes-codex-operator"
     assert initialize["params"]["clientInfo"]["title"] == "Hermes Codex Operator"
     assert initialize["params"]["clientInfo"]["version"] == "0.1.0"
+    assert initialize["params"]["capabilities"]["experimentalApi"] is (
+        SCENARIO in {"queue_protocol", "queue_protocol_wrong_version"}
+    )
     # Proves that the client starts its stdout reader before waiting on the
     # initialize response.
     send({"method": "account/updated", "params": {}})
@@ -154,11 +157,47 @@ def main() -> None:
             "codexHome": os.path.abspath(".synthetic-codex-home"),
             "platformFamily": "unix",
             "platformOs": "synthetic",
-            "userAgent": "synthetic-app-server",
+            "userAgent": (
+                "codex_cli_rs/0.150.0"
+                if SCENARIO == "queue_protocol_wrong_version"
+                else "codex_cli_rs/0.149.0"
+                if SCENARIO == "queue_protocol"
+                else "synthetic-app-server"
+            ),
         },
     )
     initialized = expect("initialized")
     assert set(initialized) == {"method"}
+
+    if SCENARIO == "queue_protocol_wrong_version":
+        wait_until_killed()
+
+    if SCENARIO == "queue_protocol":
+        loaded = expect("thread/loaded/list")
+        assert loaded["params"] == {"limit": 100}
+        response(loaded, {"data": [THREAD_ID], "nextCursor": None})
+        listed = expect("thread/queue/list")
+        assert listed["params"] == {"threadId": THREAD_ID, "limit": 100}
+        response(listed, {"data": [], "nextCursor": None})
+        added = expect("thread/queue/add")
+        assert added["params"] == {
+            "threadId": THREAD_ID,
+            "clientUserMessageId": "client-synthetic-001",
+            "input": [{"type": "text", "text": "Synthetic queued input."}],
+        }
+        submission = {
+            "id": "submission-synthetic-001",
+            "clientUserMessageId": "client-synthetic-001",
+            "input": [{"type": "text", "text": "Synthetic queued input."}],
+        }
+        response(added, {"queuedSubmission": submission})
+        started = expect("thread/queue/start")
+        assert started["params"] == {
+            "threadId": THREAD_ID,
+            "queuedSubmissionId": "submission-synthetic-001",
+        }
+        response(started, {"turn": turn_record(status="inProgress", include_final=False)})
+        wait_until_killed()
 
     if SCENARIO == "catalog_read":
         read = expect("thread/read")

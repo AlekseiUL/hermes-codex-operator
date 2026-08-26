@@ -16,7 +16,9 @@ from hermes_codex_operator.adapters import (
     RemoteTurnFailed,
     ThreadOptions,
     TurnInProgress,
+    UnsupportedCapability,
 )
+from hermes_codex_operator.adapters.app_server import EXPERIMENTAL_QUEUE_API_VERSION
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_app_server.py"
@@ -124,6 +126,53 @@ class AppServerProtocolTests(unittest.IsolatedAsyncioTestCase):
                 readback.turns[0].final_text,
                 "Synthetic verified implementation report.",
             )
+        finally:
+            await adapter.close()
+
+    async def test_exact_experimental_queue_schema_is_opt_in(self) -> None:
+        adapter = AppServerAdapter(
+            (sys.executable, os.fspath(FIXTURE), "queue_protocol"),
+            request_timeout=1.0,
+            shutdown_timeout=0.5,
+            experimental_api_version=EXPERIMENTAL_QUEUE_API_VERSION,
+        )
+        try:
+            loaded = await adapter.list_loaded_threads(limit=100)
+            self.assertEqual(loaded.thread_ids, (THREAD_ID,))
+            queue = await adapter.list_queue(THREAD_ID, limit=100)
+            self.assertEqual(queue.submissions, ())
+            submission = await adapter.add_queue(
+                THREAD_ID, "Synthetic queued input.", "client-synthetic-001"
+            )
+            self.assertEqual(submission.submission_id, "submission-synthetic-001")
+            turn = await adapter.start_queued_turn(THREAD_ID, submission.submission_id)
+            self.assertEqual(turn.turn_id, TURN_ID)
+        finally:
+            await adapter.close()
+
+    async def test_stable_adapter_rejects_queue_without_starting_transport(self) -> None:
+        adapter = self.adapter("queue_protocol")
+        try:
+            with self.assertRaises(UnsupportedCapability):
+                await adapter.list_queue(THREAD_ID)
+            self.assertIsNone(adapter._process)
+        finally:
+            await adapter.close()
+
+    def test_non_allowlisted_experimental_version_is_rejected(self) -> None:
+        with self.assertRaises(UnsupportedCapability):
+            AppServerAdapter(experimental_api_version="0.150.0")
+
+    async def test_runtime_version_mismatch_rejects_before_queue_request(self) -> None:
+        adapter = AppServerAdapter(
+            (sys.executable, os.fspath(FIXTURE), "queue_protocol_wrong_version"),
+            request_timeout=1.0,
+            shutdown_timeout=0.5,
+            experimental_api_version=EXPERIMENTAL_QUEUE_API_VERSION,
+        )
+        try:
+            with self.assertRaises(UnsupportedCapability):
+                await adapter.list_loaded_threads()
         finally:
             await adapter.close()
 

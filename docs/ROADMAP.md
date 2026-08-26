@@ -25,11 +25,12 @@ channel without screen automation; transport delivery is not part of the core.
 
 ## v0.2 — optional Codex Desktop visibility
 
-Before Desktop integration, the portable core now implements the stable Phase 3
-slice: one exact existing idle thread may be continued once through a durable
-reservation, immutable baseline turn set, exact returned-turn binding, and
-fail-closed `UNKNOWN` delivery handling. Project discovery, shared queues, and
-Desktop automation remain outside this slice.
+Before Desktop integration, the portable core implements two separate bounded
+mutations: stable `continue` for one exact idle thread, and an experimental
+exact-version `queue` path for one proven active loaded thread. Queue is
+allowlisted only for Codex 0.149.0, is never a continuation fallback, and has
+synthetic qualification only. Project discovery and Desktop automation remain
+outside these slices.
 
 Investigate a version-gated macOS adapter for creating or associating visible
 Codex Desktop projects and tasks. Prefer documented APIs or supported app state.

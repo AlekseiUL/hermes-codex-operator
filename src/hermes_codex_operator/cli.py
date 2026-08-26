@@ -9,13 +9,14 @@ import subprocess
 import sys
 from typing import Sequence
 
-from .adapters.app_server import AppServerAdapter
-from .adapters.base import AdapterError, CodexAdapter
+from .adapters.app_server import AppServerAdapter, EXPERIMENTAL_QUEUE_API_VERSION
+from .adapters.base import AdapterError, CodexAdapter, UnsupportedCapability
 from .catalog import CatalogOperator
 from .continuation import ContinuationOperator
 from .engine import AdapterFactory, Operator, OperatorOutcome
 from .journal import CompletionEvent, JournalError, SQLiteJournal, WatchRecord
 from .models import ContractValidationError, WorkContract, sha256_text
+from .queueing import QueueContinuationOperator
 from .workspace import WorkspacePolicy
 
 
@@ -65,6 +66,27 @@ def _parser() -> argparse.ArgumentParser:
     continuation.add_argument("--contract", required=True, help="JSON file or - for stdin")
     continuation.add_argument("--thread-id", required=True, help="exact existing thread ID")
     continuation.add_argument(
+        "--allow-root",
+        type=Path,
+        action="append",
+        default=[],
+        help="allowed workspace root; repeatable; defaults to current directory",
+    )
+
+    queue = commands.add_parser(
+        "queue", help="experimentally queue one exact active thread at most once"
+    )
+    queue.add_argument(
+        "--json", dest="command_json", action="store_true", help=argparse.SUPPRESS
+    )
+    queue.add_argument("--contract", required=True, help="JSON file or - for stdin")
+    queue.add_argument("--thread-id", required=True, help="exact active thread ID")
+    queue.add_argument(
+        "--experimental-api-version",
+        required=True,
+        help=f"exact allowlisted experimental API version ({EXPERIMENTAL_QUEUE_API_VERSION})",
+    )
+    queue.add_argument(
         "--allow-root",
         type=Path,
         action="append",
@@ -230,7 +252,9 @@ def _emit(value: dict[str, object], *, as_json: bool) -> None:
 
 
 def _error_value(exc: BaseException) -> dict[str, object]:
-    if isinstance(exc, ContractValidationError):
+    if isinstance(exc, UnsupportedCapability):
+        code = "UNSUPPORTED_CAPABILITY"
+    elif isinstance(exc, ContractValidationError):
         code = "invalid_contract"
     elif isinstance(exc, JournalError):
         code = exc.__class__.__name__.lower()
@@ -341,9 +365,26 @@ def main(
                 contract = _read_contract(args.contract)
                 roots = tuple(args.allow_root) or (Path.cwd(),)
                 policy = WorkspacePolicy(tuple(Path(root).resolve() for root in roots))
-                factory = adapter_factory or (lambda: AppServerAdapter())
+                if args.command == "queue":
+                    version = args.experimental_api_version
+                    if version != EXPERIMENTAL_QUEUE_API_VERSION:
+                        raise UnsupportedCapability("UNSUPPORTED_CAPABILITY")
+                    factory = adapter_factory or (
+                        lambda: AppServerAdapter(experimental_api_version=version)
+                    )
+                else:
+                    factory = adapter_factory or (lambda: AppServerAdapter())
                 operator = Operator(journal, factory, policy)
-                if args.command == "continue":
+                if args.command == "queue":
+                    outcome = asyncio.run(
+                        QueueContinuationOperator(
+                            journal,
+                            factory,
+                            policy,
+                            experimental_api_version=args.experimental_api_version,
+                        ).continue_active(contract, thread_id=args.thread_id)
+                    )
+                elif args.command == "continue":
                     outcome = asyncio.run(
                         ContinuationOperator(journal, factory, policy).continue_idle(
                             contract, thread_id=args.thread_id

@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from hermes_codex_operator.adapters.fake import FakeBackend, FakeCodexAdapter
+from hermes_codex_operator.adapters.app_server import EXPERIMENTAL_QUEUE_API_VERSION
 from hermes_codex_operator.cli import default_state_path, main
 
 
@@ -286,6 +287,60 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertFalse(json.loads(output.getvalue())["dispatched"])
             self.assertEqual(backend.start_turn_calls, 1)
+
+    def test_queue_cli_requires_exact_experimental_version_and_active_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            workspace = root_path / "workspace"
+            (workspace / "src").mkdir(parents=True)
+            contract = root_path / "contract.json"
+            contract.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1",
+                        "task_id": "active-task",
+                        "operation_id": "queue-001",
+                        "workspace": str(workspace),
+                        "prompt": "Queue the synthetic active task once.",
+                        "allowed_change_globs": ["src/**"],
+                        "verification": [[sys.executable, "-c", "raise SystemExit(0)"]],
+                        "timeout_seconds": 5,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            backend = FakeBackend(thread_id="thread-active", turn_id="turn-queued")
+            backend.threads[backend.thread_id] = workspace
+            backend.turns[(backend.thread_id, "turn-active")] = "inProgress"  # type: ignore[assignment]
+            backend.thread_statuses[backend.thread_id] = "active"
+            backend.loaded_thread_ids = [backend.thread_id]
+            base = [
+                "--state", str(root_path / "state.sqlite3"), "queue", "--json",
+                "--contract", str(contract), "--thread-id", backend.thread_id,
+                "--allow-root", str(root_path), "--experimental-api-version",
+            ]
+
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [*base, EXPERIMENTAL_QUEUE_API_VERSION],
+                    adapter_factory=lambda: FakeCodexAdapter(backend),
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue())["status"], "VERIFIED")
+            self.assertEqual(backend.queue_add_calls, 1)
+
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [*base, "0.150.0"],
+                    adapter_factory=lambda: FakeCodexAdapter(backend),
+                )
+            self.assertEqual(code, 2)
+            self.assertEqual(
+                json.loads(output.getvalue())["error_code"], "UNSUPPORTED_CAPABILITY"
+            )
+            self.assertEqual(backend.queue_add_calls, 1)
 
 
 if __name__ == "__main__":

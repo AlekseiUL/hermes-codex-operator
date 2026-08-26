@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 from typing import Any, Mapping, Sequence, cast
@@ -15,7 +16,10 @@ from .base import (
     AdapterTimeout,
     AppServerProcessError,
     DeliveryUnknown,
+    LoadedThreadPage,
     ProtocolIntegrityError,
+    QueuePage,
+    QueuedSubmission,
     ReadbackMissingResult,
     RemoteRequestError,
     RemoteTurnFailed,
@@ -32,6 +36,7 @@ from .base import (
     TurnTerminalStatus,
     validate_command,
 )
+from ..models import canonical_json, sha256_text
 
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "interrupted"})
@@ -41,6 +46,7 @@ _SANDBOX_TYPES = {
     "workspace-write": "workspaceWrite",
     "danger-full-access": "dangerFullAccess",
 }
+EXPERIMENTAL_QUEUE_API_VERSION = "0.149.0"
 
 
 @dataclass(slots=True)
@@ -70,6 +76,7 @@ class AppServerAdapter:
         stdout_line_limit_bytes: int = 4 * 1024 * 1024,
         client_name: str = "hermes-codex-operator",
         client_version: str = "0.1.0",
+        experimental_api_version: str | None = None,
     ) -> None:
         self._command = validate_command(command)
         if request_timeout <= 0 or shutdown_timeout <= 0:
@@ -78,6 +85,10 @@ class AppServerAdapter:
             raise ValueError("stream limits are too small")
         if not client_name or not client_version:
             raise ValueError("client identity must be non-empty")
+        if experimental_api_version not in {None, EXPERIMENTAL_QUEUE_API_VERSION}:
+            from .base import UnsupportedCapability
+
+            raise UnsupportedCapability("UNSUPPORTED_CAPABILITY")
 
         self._request_timeout = request_timeout
         self._shutdown_timeout = shutdown_timeout
@@ -85,6 +96,7 @@ class AppServerAdapter:
         self._stdout_line_limit = stdout_line_limit_bytes
         self._client_name = client_name
         self._client_version = client_version
+        self._experimental_api_version = experimental_api_version
 
         self._process: asyncio.subprocess.Process | None = None
         self._process_group_id: int | None = None
@@ -174,7 +186,9 @@ class AppServerAdapter:
                             "title": "Hermes Codex Operator",
                             "version": self._client_version,
                         },
-                        "capabilities": {"experimentalApi": False},
+                        "capabilities": {
+                            "experimentalApi": self._experimental_api_version is not None
+                        },
                     },
                     side_effect=False,
                 )
@@ -262,6 +276,84 @@ class AppServerAdapter:
         if len(set(identities)) != len(identities):
             raise ProtocolIntegrityError("thread/read returned duplicate turn ids")
         return ThreadCatalogReadback(summary, turns)
+
+    async def list_loaded_threads(
+        self, *, cursor: str | None = None, limit: int = 100
+    ) -> LoadedThreadPage:
+        self._require_queue_capability()
+        await self._ensure_started()
+        self._validate_page_limit(limit, "thread/loaded/list")
+        params: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = self._nonempty_string(cursor, "cursor")
+        result = await self._request("thread/loaded/list", params, side_effect=False)
+        data, next_cursor = self._parse_page(result, "thread/loaded/list", limit)
+        ids = tuple(self._nonempty_string(item, "thread/loaded/list data") for item in data)
+        return LoadedThreadPage(ids, next_cursor)
+
+    async def list_queue(
+        self, thread_id: str, *, cursor: str | None = None, limit: int = 100
+    ) -> QueuePage:
+        self._require_queue_capability()
+        await self._ensure_started()
+        expected = self._nonempty_string(thread_id, "thread_id")
+        self._validate_page_limit(limit, "thread/queue/list")
+        params: dict[str, Any] = {"threadId": expected, "limit": limit}
+        if cursor is not None:
+            params["cursor"] = self._nonempty_string(cursor, "cursor")
+        result = await self._request("thread/queue/list", params, side_effect=False)
+        data, next_cursor = self._parse_page(result, "thread/queue/list", limit)
+        submissions = tuple(self._parse_queued_submission(item) for item in data)
+        identities = tuple(item.submission_id for item in submissions)
+        if len(set(identities)) != len(identities):
+            raise ProtocolIntegrityError("thread/queue/list returned duplicate submission ids")
+        return QueuePage(submissions, next_cursor)
+
+    async def add_queue(
+        self, thread_id: str, prompt: str, client_message_id: str
+    ) -> QueuedSubmission:
+        self._require_queue_capability()
+        await self._ensure_started()
+        expected = self._nonempty_string(thread_id, "thread_id")
+        text = self._nonempty_string(prompt, "prompt")
+        client_id = self._nonempty_string(client_message_id, "client_message_id")
+        result = await self._request(
+            "thread/queue/add",
+            {
+                "threadId": expected,
+                "clientUserMessageId": client_id,
+                "input": [{"type": "text", "text": text}],
+            },
+            side_effect=True,
+        )
+        queued = self._result_object(result, "thread/queue/add", "queuedSubmission")
+        submission = self._parse_queued_submission(queued)
+        if submission.client_message_id != client_id:
+            raise ProtocolIntegrityError("thread/queue/add changed client message identity")
+        expected_digest = sha256_text(
+            canonical_json({"input": [{"text": text, "type": "text"}]})
+        )
+        if submission.input_sha256 != expected_digest:
+            raise ProtocolIntegrityError("thread/queue/add changed queued input")
+        return submission
+
+    async def start_queued_turn(
+        self, thread_id: str, submission_id: str
+    ) -> TurnHandle:
+        self._require_queue_capability()
+        await self._ensure_started()
+        expected = self._nonempty_string(thread_id, "thread_id")
+        submission = self._nonempty_string(submission_id, "submission_id")
+        result = await self._request(
+            "thread/queue/start",
+            {"threadId": expected, "queuedSubmissionId": submission},
+            side_effect=True,
+        )
+        turn = self._result_object(result, "thread/queue/start", "turn")
+        return TurnHandle(
+            expected,
+            self._nonempty_string(turn.get("id"), "thread/queue/start turn.id"),
+        )
 
     async def resume_thread(
         self,
@@ -868,6 +960,15 @@ class AppServerAdapter:
             raise ProtocolIntegrityError("initialize codexHome must be absolute")
         for field in ("platformFamily", "platformOs", "userAgent"):
             self._nonempty_string(result.get(field), f"initialize {field}")
+        if self._experimental_api_version is not None:
+            user_agent = result["userAgent"]
+            version = re.search(
+                r"(?:^|[\s/])(\d+\.\d+\.\d+)(?:$|[\s;(])", user_agent
+            )
+            if version is None or version.group(1) != self._experimental_api_version:
+                from .base import UnsupportedCapability
+
+                raise UnsupportedCapability("UNSUPPORTED_CAPABILITY")
 
     def _validate_thread_result(
         self,
@@ -1092,6 +1193,51 @@ class AppServerAdapter:
     def _include(target: dict[str, Any], key: str, value: Any) -> None:
         if value is not None:
             target[key] = value
+
+    def _require_queue_capability(self) -> None:
+        if self._experimental_api_version != EXPERIMENTAL_QUEUE_API_VERSION:
+            from .base import UnsupportedCapability
+
+            raise UnsupportedCapability("UNSUPPORTED_CAPABILITY")
+
+    @staticmethod
+    def _validate_page_limit(limit: int, method: str) -> None:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError(f"{method} limit must be an integer from 1 to 100")
+
+    @staticmethod
+    def _parse_page(result: Any, method: str, limit: int) -> tuple[list[Any], str | None]:
+        if not isinstance(result, Mapping):
+            raise ProtocolIntegrityError(f"{method} result must be an object")
+        data = result.get("data")
+        if not isinstance(data, list) or len(data) > limit:
+            raise ProtocolIntegrityError(f"{method} result.data is invalid")
+        cursor = result.get("nextCursor")
+        if cursor is not None and (not isinstance(cursor, str) or not cursor):
+            raise ProtocolIntegrityError(f"{method} nextCursor is invalid")
+        return data, cursor
+
+    def _parse_queued_submission(self, value: Any) -> QueuedSubmission:
+        if not isinstance(value, Mapping):
+            raise ProtocolIntegrityError("queued submission must be an object")
+        submission_id = self._nonempty_string(value.get("id"), "queued submission id")
+        client_id = self._nonempty_string(
+            value.get("clientUserMessageId"),
+            "queued submission clientUserMessageId",
+        )
+        raw_input = value.get("input")
+        if not isinstance(raw_input, list) or not raw_input or any(
+            not isinstance(item, Mapping) for item in raw_input
+        ):
+            raise ProtocolIntegrityError(
+                "queued submission input must be a non-empty object array"
+            )
+        normalized = [dict(item) for item in raw_input]
+        return QueuedSubmission(
+            submission_id,
+            client_id,
+            sha256_text(canonical_json({"input": normalized})),
+        )
 
     @staticmethod
     def _nonempty_string(value: Any, field: str) -> str:

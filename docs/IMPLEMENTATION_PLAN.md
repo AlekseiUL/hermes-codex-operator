@@ -83,7 +83,24 @@ oversized baselines, lost/malformed delivery, multiple-turn correlation,
 terminal failure, migration, and two-process contention are covered with
 synthetic fixtures only.
 **Result:** One bounded continuation mutation; catalog/read/adopt/watch/events
-remain strictly read-only and project/queue/Desktop APIs remain excluded.
+remain strictly read-only, and project/queue/Desktop APIs remain excluded from
+this stable continuation path.
+
+### Step 6b: Queue one exact active task through an experimental shared queue
+
+**What:** Add a separate exact-version opt-in `queue` command with loaded/active
+ownership proof, immutable queue baseline, one enqueue, one bounded recovery
+inspection, exact submission/turn binding, and authoritative completion.
+**Files:** `src/hermes_codex_operator/queueing.py`,
+`src/hermes_codex_operator/adapters/app_server.py`,
+`src/hermes_codex_operator/journal.py`, `src/hermes_codex_operator/cli.py`,
+`tests/test_queueing.py`, `tests/test_app_server_protocol.py`
+**Commands:** `python3 -m unittest tests.test_queueing tests.test_app_server_protocol -v`
+**Check:** exact opt-in, unsupported versions, ownership ambiguity, contention,
+lost/malformed enqueue recovery, duplicate/mismatched identity, baseline bounds,
+turn correlation, exact readback, and repeat/restart behavior are covered.
+**Result:** One experimental 0.149.0 queue mutation; stable adapter remains
+`experimentalApi: false`, and queue never becomes continuation fallback.
 
 ### Step 7: Add privacy and release gates
 

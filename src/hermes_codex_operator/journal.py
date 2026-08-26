@@ -34,7 +34,7 @@ from .models import (
 from .workspace import WorkspaceSnapshot, snapshot_from_dict, snapshot_to_dict
 
 
-DATABASE_VERSION = 3
+DATABASE_VERSION = 4
 WATCH_STATES = frozenset({"ACTIVE", "COMPLETED", "FAILED", "INTERRUPTED", "UNKNOWN"})
 WATCH_TERMINAL_STATES = WATCH_STATES - {"ACTIVE"}
 
@@ -154,6 +154,17 @@ class ContinuationBaseline:
     created_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class QueueBaseline:
+    operation_id: str
+    thread_id: str
+    message_sha256: str
+    turn_ids: tuple[str, ...]
+    turn_ids_sha256: str
+    submission_id: str | None
+    created_at: str
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
         "+00:00", "Z"
@@ -253,7 +264,7 @@ class SQLiteJournal:
             version = int(
                 self._connection.execute("PRAGMA user_version").fetchone()[0]
             )
-            if version not in (0, 1, 2, DATABASE_VERSION):
+            if version not in (0, 1, 2, 3, DATABASE_VERSION):
                 raise JournalError("unsupported journal schema version")
             self._connection.execute(
                 """
@@ -403,6 +414,43 @@ class SQLiteJournal:
                 END
                 """
             )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS queue_baselines (
+                    operation_id TEXT PRIMARY KEY REFERENCES operations(operation_id),
+                    thread_id TEXT NOT NULL,
+                    message_sha256 TEXT NOT NULL CHECK(length(message_sha256) = 64),
+                    turn_ids_sha256 TEXT NOT NULL CHECK(length(turn_ids_sha256) = 64),
+                    turn_ids_json TEXT NOT NULL,
+                    submission_id TEXT UNIQUE,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS queue_baselines_identity_is_immutable
+                BEFORE UPDATE ON queue_baselines
+                WHEN OLD.operation_id != NEW.operation_id
+                  OR OLD.thread_id != NEW.thread_id
+                  OR OLD.message_sha256 != NEW.message_sha256
+                  OR OLD.turn_ids_sha256 != NEW.turn_ids_sha256
+                  OR OLD.turn_ids_json != NEW.turn_ids_json
+                  OR (OLD.submission_id IS NOT NULL AND OLD.submission_id != NEW.submission_id)
+                BEGIN
+                    SELECT RAISE(ABORT, 'queue baseline identity is immutable');
+                END
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS queue_baselines_are_immutable_on_delete
+                BEFORE DELETE ON queue_baselines
+                BEGIN
+                    SELECT RAISE(ABORT, 'queue baselines are immutable');
+                END
+                """
+            )
             try:
                 self._connection.execute(
                     """
@@ -410,6 +458,7 @@ class SQLiteJournal:
                     ON operations(task_id)
                     WHERE state IN (
                         'QUEUED', 'STARTING_THREAD', 'READY', 'DISPATCHING',
+                        'QUEUE_DISPATCH_IN_FLIGHT',
                         'RUNNING', 'TURN_COMPLETED', 'VERIFYING', 'TIMED_OUT',
                         'UNKNOWN'
                     )
@@ -419,7 +468,7 @@ class SQLiteJournal:
                 raise JournalError(
                     "journal already contains multiple open operations for one task"
                 ) from exc
-            if version in (0, 1, 2):
+            if version in (0, 1, 2, 3):
                 self._connection.execute(f"PRAGMA user_version = {DATABASE_VERSION}")
 
     def _tighten_permissions(self) -> None:
@@ -548,6 +597,7 @@ class SQLiteJournal:
                 SELECT operation_id FROM operations
                 WHERE task_id = ? AND state IN (
                     'QUEUED', 'STARTING_THREAD', 'READY', 'DISPATCHING',
+                    'QUEUE_DISPATCH_IN_FLIGHT',
                     'RUNNING', 'TURN_COMPLETED', 'VERIFYING', 'TIMED_OUT',
                     'UNKNOWN'
                 )
@@ -683,6 +733,122 @@ class SQLiteJournal:
             if row is None:
                 raise RecordNotFound("continuation baseline does not exist")
             return self._continuation_baseline_from_row(row)
+
+    def store_queue_baseline(
+        self,
+        operation_id: str,
+        thread_id: str,
+        message_sha256: str,
+        turn_ids: tuple[str, ...],
+    ) -> QueueBaseline:
+        validate_external_id(thread_id, "thread_id")
+        if len(message_sha256) != 64 or any(c not in "0123456789abcdef" for c in message_sha256):
+            raise JournalError("queue message digest is invalid")
+        if not isinstance(turn_ids, tuple) or len(turn_ids) > 1000:
+            raise JournalError("queue baseline turn set is invalid or oversized")
+        for turn_id in turn_ids:
+            validate_external_id(turn_id, "turn_id")
+        if len(set(turn_ids)) != len(turn_ids):
+            raise JournalError("queue baseline contains duplicate turn ids")
+        ordered = tuple(sorted(turn_ids))
+        payload = canonical_json({"turn_ids": list(ordered)})
+        digest = sha256_text(payload)
+        with self._transaction():
+            operation = self._select_operation(operation_id)
+            if operation is None:
+                raise RecordNotFound("operation does not exist")
+            task = self._select_task(operation["task_id"])
+            if task is None or task["thread_id"] != thread_id:
+                raise BindingConflict("queue thread is not bound to the operation task")
+            existing = self._connection.execute(
+                "SELECT * FROM queue_baselines WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["thread_id"] != thread_id
+                    or existing["message_sha256"] != message_sha256
+                    or existing["turn_ids_sha256"] != digest
+                    or existing["turn_ids_json"] != payload
+                ):
+                    raise BaselineConflict("queue baseline is immutable")
+                return self._queue_baseline_from_row(existing)
+            now = _utc_now()
+            self._connection.execute(
+                """
+                INSERT INTO queue_baselines(
+                    operation_id, thread_id, message_sha256, turn_ids_sha256,
+                    turn_ids_json, submission_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, NULL, ?)
+                """,
+                (operation_id, thread_id, message_sha256, digest, payload, now),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM queue_baselines WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            assert row is not None
+            return self._queue_baseline_from_row(row)
+
+    def bind_queue_submission(self, operation_id: str, submission_id: str) -> QueueBaseline:
+        validate_external_id(submission_id, "submission_id")
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT * FROM queue_baselines WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("queue baseline does not exist")
+            if row["submission_id"] is not None:
+                if row["submission_id"] != submission_id:
+                    raise BindingConflict("operation is already bound to another queue submission")
+                return self._queue_baseline_from_row(row)
+            try:
+                self._connection.execute(
+                    "UPDATE queue_baselines SET submission_id = ? WHERE operation_id = ?",
+                    (submission_id, operation_id),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise BindingConflict("queue submission is already bound") from exc
+            updated = self._connection.execute(
+                "SELECT * FROM queue_baselines WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            assert updated is not None
+            return self._queue_baseline_from_row(updated)
+
+    @staticmethod
+    def _queue_baseline_from_row(row: sqlite3.Row) -> QueueBaseline:
+        try:
+            value = json.loads(row["turn_ids_json"])
+            raw_ids = value["turn_ids"] if isinstance(value, dict) and set(value) == {"turn_ids"} else None
+            if not isinstance(raw_ids, list) or len(raw_ids) > 1000:
+                raise TypeError
+            turn_ids = tuple(raw_ids)
+            for turn_id in turn_ids:
+                validate_external_id(turn_id, "turn_id")
+            if len(set(turn_ids)) != len(turn_ids) or turn_ids != tuple(sorted(turn_ids)):
+                raise TypeError
+        except (ContractValidationError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            raise JournalError("queue baseline is malformed") from exc
+        payload = canonical_json({"turn_ids": list(turn_ids)})
+        if payload != row["turn_ids_json"] or sha256_text(payload) != row["turn_ids_sha256"]:
+            raise JournalError("queue baseline digest mismatch")
+        return QueueBaseline(
+            operation_id=row["operation_id"],
+            thread_id=row["thread_id"],
+            message_sha256=row["message_sha256"],
+            turn_ids=turn_ids,
+            turn_ids_sha256=row["turn_ids_sha256"],
+            submission_id=row["submission_id"],
+            created_at=row["created_at"],
+        )
+
+    def get_queue_baseline(self, operation_id: str) -> QueueBaseline:
+        with self._lock:
+            self._ensure_open()
+            row = self._connection.execute(
+                "SELECT * FROM queue_baselines WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("queue baseline does not exist")
+            return self._queue_baseline_from_row(row)
 
     def get_task(self, task_id: str) -> TaskRecord:
         with self._lock:
@@ -842,6 +1008,7 @@ class SQLiteJournal:
             current = OperationState(row["state"])
             if current not in {
                 OperationState.DISPATCHING,
+                OperationState.QUEUE_DISPATCH_IN_FLIGHT,
                 OperationState.RUNNING,
                 OperationState.UNKNOWN,
                 OperationState.TIMED_OUT,

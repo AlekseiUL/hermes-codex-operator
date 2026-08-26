@@ -105,7 +105,7 @@ def make_receipt(
 
 
 class JournalReservationTests(unittest.TestCase):
-    def test_v2_journal_migrates_to_v3_without_losing_operations(self) -> None:
+    def test_v2_journal_migrates_to_v4_without_losing_operations(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             workspace = root_path / "workspace"
@@ -123,10 +123,15 @@ class JournalReservationTests(unittest.TestCase):
             with SQLiteJournal(database) as migrated:
                 self.assertEqual(migrated.get_operation(contract.operation_id).operation_id, contract.operation_id)
                 with closing(sqlite3.connect(database)) as check:
-                    self.assertEqual(check.execute("PRAGMA user_version").fetchone()[0], 3)
+                    self.assertEqual(check.execute("PRAGMA user_version").fetchone()[0], 4)
                     self.assertIsNotNone(
                         check.execute(
                             "SELECT name FROM sqlite_master WHERE name = 'continuation_baselines'"
+                        ).fetchone()
+                    )
+                    self.assertIsNotNone(
+                        check.execute(
+                            "SELECT name FROM sqlite_master WHERE name = 'queue_baselines'"
                         ).fetchone()
                     )
 

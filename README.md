@@ -105,6 +105,7 @@ transport-neutral local outbox. Delivery remains the host application's job.
 | Clarify an idea; propose architecture, options, decomposition, and acceptance criteria | Included in the Hermes skill |
 | Start a new Codex task | Implemented in the core |
 | Continue one exact existing idle task once | Implemented as the explicit `continue` command |
+| Queue one exact active Desktop-owned task once | Experimental opt-in `queue` command, allowlisted only for Codex CLI/App Server 0.149.0 |
 | Wait for the exact turn, read it authoritatively, and return the result | Implemented in the core |
 | Verify changed-file scope and argv-only checks | Implemented in the core |
 | Durable status, conservative recovery, immutable receipts | Implemented in the core |
@@ -227,6 +228,29 @@ returns `dispatched=false` and never submits again. Raw final text is returned
 only by this explicit mutation invocation or the existing explicit `collect`
 and `catalog read --include-result` surfaces.
 
+The shared-queue path is a separate experimental mutation, never a fallback
+from `continue`. It must be requested with the exact qualified version:
+
+```bash
+hermes-codex queue \
+  --contract work-contract.json \
+  --thread-id THREAD_ID \
+  --experimental-api-version 0.149.0 \
+  --allow-root /absolute/path/to/projects \
+  --json
+```
+
+Stable commands initialize App Server with `experimentalApi: false`. `queue`
+alone opts into `experimentalApi: true`, proves that the exact active thread is
+loaded, verifies the initialized App Server's exact `0.149.0` runtime evidence,
+stores the message and baseline-turn digests, and enqueues once. A lost
+or malformed enqueue response gets one bounded queue inspection and no retry;
+zero, multiple, duplicated, or mismatched candidates become `UNKNOWN`. Queue
+disappearance is not completion: success still requires one uniquely
+correlated new turn plus authoritative completed exact-turn readback. This
+surface has synthetic qualification only and must be requalified for every
+Codex version.
+
 For lifecycle commands, JSON `ok` means the operation is `VERIFIED`. `status`
 still exits `0` when it successfully reads a non-verified record, so automation
 must inspect both `status` and `ok`. Invocation/configuration errors exit `2`;
@@ -259,6 +283,8 @@ stateDiagram-v2
     QUEUED --> STARTING_THREAD
     STARTING_THREAD --> READY
     READY --> DISPATCHING
+    READY --> QUEUE_DISPATCH_IN_FLIGHT: explicit experimental queue
+    QUEUE_DISPATCH_IN_FLIGHT --> RUNNING
     DISPATCHING --> RUNNING
     RUNNING --> TURN_COMPLETED
     TURN_COMPLETED --> VERIFYING
@@ -377,6 +403,8 @@ Server. Вы формулируете задачу обычным языком. 
 ### Что уже работает в v0.1.0
 
 - новый запуск Codex и продолжение того же контекста;
+- отдельная экспериментальная команда `queue` для однократной постановки
+  активной Desktop-задачи в общую очередь только с точным opt-in `0.149.0`;
 - постоянные идентификаторы задачи, операции, потока и запуска;
 - защита от автоматической повторной отправки при неоднозначном результате;
 - точное чтение финального ответа через `thread/read`;

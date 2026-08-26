@@ -95,6 +95,28 @@ Any lost, malformed, mismatched, or ambiguous resume/start delivery is
 for, read, verified, collected, or reconciled. Project inference, queues, and
 Desktop UI automation are not part of this protocol.
 
+## Experimental active-task shared queue
+
+`queue` is a separate opt-in mutation for a proven active loaded thread. It is
+not a retry or fallback from `continue` and currently accepts only
+`--experimental-api-version 0.149.0`. Stable adapter usage remains
+`experimentalApi: false`; unsupported or omitted versions fail before queue
+side effects, and initialized App Server runtime evidence must report the same
+exact version.
+
+Before enqueue, the operator proves one exact loaded owner plus one active turn,
+binds the thread/workspace, and stores the contract-message hash and complete
+baseline turn-set digest. It then persists `QUEUE_DISPATCH_IN_FLIGHT`, enqueues
+once, and atomically binds the exact submission ID. A lost or malformed enqueue
+response permits one queue inspection for one exact durable match, never a
+second enqueue. Zero, multiple, duplicate, or mismatched matches are `UNKNOWN`.
+
+Queue disappearance is not success. The operation needs exactly one new turn
+relative to the baseline, exact turn binding, a completed authoritative
+readback, and a final result before verification. Repeat or restart only
+observes durable state with `dispatched=false`. This capability has synthetic
+qualification only; live queue mutation needs separate approval.
+
 An unsupported server approval request fails closed instead of silently
 broadening permissions. A future interactive approval adapter requires a new
 protocol version rather than an unused v1 state.

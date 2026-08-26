@@ -26,10 +26,15 @@ experimental `codex app-server` command:
 - `turn/start` and matching `turn/completed` notifications;
 - `thread/read` with full turns for authoritative exact-turn readback.
 
-The client does not opt into experimental API capabilities or methods. Unknown
-server requests and permission broadening fail closed. Because the executable
-surface itself is experimental, support is always tied to an exact qualified
-Codex CLI version rather than assumed across releases.
+Stable commands do not opt into experimental API capabilities or methods and
+initialize with `experimentalApi: false`. The separate `queue` command accepts
+only an explicit exact `--experimental-api-version 0.149.0`, initializes with
+`experimentalApi: true`, and uses the generated 0.149.0 schemas for
+`thread/loaded/list`, `thread/queue/list`, `thread/queue/add`, and
+`thread/queue/start`. Unqualified, older, or newer versions fail with
+`UNSUPPORTED_CAPABILITY`; the initialized App Server `userAgent` must also
+report the exact selected version before any queue side effect.
+Unknown server requests and permission broadening fail closed.
 
 `project/list` is deliberately excluded from v0.1.0. Catalog/read/adopt/watch do
 not call `thread/resume`, `thread/start`, or `turn/start`; they use only
@@ -45,6 +50,15 @@ proof, stores a bounded immutable turn-ID baseline, then allows exactly one
 purposes: an unconfirmed response is `UNKNOWN` and is never auto-resubmitted.
 This path currently has synthetic protocol/failure qualification only; no live
 mutating continuation has been run.
+
+The experimental active-thread queue path is separate from idle continuation,
+catalog, and watch. It requires exact loaded-thread and active-turn ownership,
+persists an immutable SQLite v4 queue baseline before dispatch, enqueues once,
+and never treats a lost response or restart as permission to enqueue again.
+Queue inspection is bounded to one page after malformed/lost enqueue delivery;
+completion requires unique new-turn correlation and authoritative exact-turn
+readback. It has synthetic protocol/failure qualification only; no live
+mutating queue smoke has been authorized or run.
 
 The official App Server documentation states that stdio uses newline-delimited
 JSON, requires the initialization handshake, and models conversation as
