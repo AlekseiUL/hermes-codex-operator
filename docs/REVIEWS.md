@@ -1,19 +1,39 @@
 # Release reviews
 
-**Status:** `v0.1.0` candidate review in progress; not release-ready
-**Reviewed:** 2026-08-26
-**Boundary:** source, synthetic tests, documentation, and local release process
+**Status:** public pre-alpha source; `v0.1.0` runtime candidate qualified, tag not yet published
 
-Most review records below describe the released `v0.0.1` baseline. The new
-managed-daemon queue path remains a candidate until its exact commit passes all
-local gates, public CI, artifact readback, and an explicitly authorized live
-smoke. No review replaces owner authorization to publish.
+**Reviewed:** 2026-08-26
+
+**Boundary:** source, tests, live compatibility evidence, documentation, Git history, and release artifacts
+
+This record separates historical evidence from current proof. A passing review
+does not authorize deployment or publication side effects, and a live result
+qualifies only the exact platform, Codex version, and protocol surface named.
+
+## Current release verdict
+
+The current documentation-hardening candidate passed the bounded release gate:
+
+- 203 unit, protocol, and documentation-gate tests in the public matrix;
+- Python 3.11–3.14 on Linux, macOS, and Windows;
+- Ruff, Pyright, compilation, diff-integrity, and Git-integrity checks;
+- tree, staged, reachable-history, sdist, and wheel privacy scans;
+- normalized sdist and wheel build/install/CLI smoke;
+- ordinary Codex App Server lifecycle live smoke on macOS arm64 with `0.149.0`;
+- managed-daemon queue live smoke with one submission and restart
+  `dispatched=false`;
+- fresh public-clone privacy and installation smoke.
+
+Verdict: no known source, packaging, or reachable-history blocker for the
+current candidate. The project remains pre-alpha because App Server
+and queue transport are experimental and several integrations are intentionally
+unqualified.
 
 ## Lifecycle and crash-safety review
 
-An independent read-only audit exercised duplicate callers, lost responses,
-restart recovery, cancellation, verification side effects, and SQLite
-finalization. Findings resolved before this record was written include:
+The lifecycle review covered duplicate callers, lost responses, restart
+recovery, cancellation, verification side effects, and SQLite finalization.
+Resolved controls include:
 
 - process-safe ownership of one operation;
 - `UNKNOWN` after ambiguous post-dispatch failures;
@@ -21,85 +41,73 @@ finalization. Findings resolved before this record was written include:
 - cancellation-safe verification and final evidence capture;
 - cleanup of POSIX background descendants before final scope evidence;
 - segment-aware change globs;
-- atomic terminal state plus immutable receipt, with no legacy transition
-  bypass.
+- atomic terminal state plus immutable receipt.
 
-Final verdict: no lifecycle blocker.
+Verdict: no known lifecycle blocker in the reviewed runtime tree.
 
-## App Server protocol review
+## App Server and shared-queue review
 
-An independent read-only protocol audit checked JSONL correlation, initialize
-ordering, authoritative `thread/read`, cancellation, timeout, process-group
-cleanup, resume permissions, and malformed successful responses. A malformed
-`turn/start` response without a trustworthy turn ID now becomes `UNKNOWN` and
-cannot be dispatched again automatically; a valid explicit server rejection
-remains `FAILED`.
+The protocol review checked JSON correlation, initialization ordering,
+authoritative `thread/read`, cancellation, timeout, process cleanup, malformed
+successful responses, and queue races. The active-queue hardening now requires:
 
-Final verdict: no protocol blocker.
+- exact managed-daemon version and socket evidence;
+- one loaded thread and active owner;
+- one queue submission per operation;
+- exact client-message ID and normalized-input digest;
+- authoritative owner and target completion readback;
+- exact queue absence and stable workspace/thread identity immediately before
+  `VERIFIED`;
+- no dispatch after repeat or restart.
 
-## Hermes reliability review
+A historical embedded queue smoke proved only a partial same-adapter path. The
+later managed-daemon smoke exercised the public direct Unix-socket CLI and
+proved restart non-dispatch. It did not claim whether server-side automatic
+consumption or the bounded manual-start fallback consumed the item.
 
-An independent Hermes reliability reviewer inspected only this clean-room
-repository in read-only mode. The verdict was `READY FOR LOCAL
-PRE-PUBLICATION REVIEW`: no private paths, names, infrastructure bindings,
-runtime databases, hidden packages, or unresolved reliability blockers were
-found.
-
-The review suggested small documentation/schema alignment and a digest binding
-for authoritative results. Those changes are included.
+Verdict: qualified for experimental use only with exact Codex `0.149.0` on the
+tested macOS host.
 
 ## Public release surface review
 
-An independent read-only audit then treated filenames, Git objects, source and
-wheel distributions, package metadata, CI, documentation, and product claims as
-one publication surface. Findings resolved before this record was written
-include:
+The release-surface audit treats filenames, Git objects, source distributions,
+wheels, metadata, CI, documentation, and product claims as one boundary.
+Controls include:
 
-- sensitive filenames are fingerprinted instead of echoed by the privacy gate;
-- source archives and ZIP/wheel artifacts receive the same bounded structural
-  and content scan;
-- generated sdists are atomically normalized so local account names cannot
-  survive in tar owner metadata;
-- the reviewed hero image is allowlisted by one exact path and digest;
-- the build frontend, backend, and GitHub Actions are pinned to exact versions
-  or commit SHAs;
-- the source distribution includes the Hermes skill while the wheel is
-  explicitly documented as core-only;
-- empty change-scope rules are rejected instead of meaning unrestricted scope;
-- verification commands are described as trusted host code outside the Codex
-  sandbox;
-- App Server, OS, Python, Hermes, Desktop, notification, and restart claims are
-  qualified to the evidence actually available.
+- fingerprint-only privacy findings;
+- bounded source/archive inspection;
+- deterministic sdist owner/timestamp normalization;
+- exact allowlisting of the reviewed hero image;
+- pinned build tooling and GitHub Actions;
+- core-only wheel and repository-bundled Hermes skill documented separately;
+- explicit verification-command and active-queue causality limits.
 
-Historical verdict for the reviewed `v0.0.1` source: no known
-publication-surface blocker. The current `v0.1.0` tree has changed and must be
-reviewed and rebuilt again; this record is not permission to publish it.
+A post-merge audit found a personal author email in one GitHub-generated merge
+commit. The reachable `main` history was replaced with a content-identical
+noreply commit and a fresh public-clone history scan passed. GitHub may retain
+an unreachable object by direct SHA until server-side garbage collection; that
+object is not reachable from `main` or a normal clone.
+
+## Documentation review
+
+The 2026-08-26 documentation hardening reconciled README, compatibility,
+reviews, roadmap, RFC status, implementation record, skill protocol, package
+dependency, commands, live evidence, and GitHub settings. Every command shown
+was checked against CLI help; internal links and Mermaid sources are release
+gates.
 
 ## Residual limits
 
-- This is a pre-alpha local MVP, not a security audit or an OS sandbox.
-- The automated suite uses a scripted App Server and synthetic workspaces.
-- A live App Server smoke test can create real local Codex state and is not part
-  of the default suite. The stable lifecycle passed on Codex 0.149.0. A
-  historical embedded same-adapter queue smoke also passed, but it did not
-  exercise the public CLI through `codex app-server proxy` and did not prove
-  whether automatic consumption or manual queue start was used.
-- A subsequent independent adversarial review found that one unrelated new turn
-  could be accepted if the exact submission disappeared between two protocol
-  reads. Resulting turns are now bound only when their user message carries the
-  exact queued client ID and normalized-input digest, with a regression proving
-  `UNKNOWN`, one enqueue, zero queue-start calls, and no restart dispatch.
-- The exact `v0.1.0` managed-daemon queue CLI has not yet received an authorized
-  live qualification. Synthetic tests cover automatic-consume, manual-start,
-  contradictory identity, restart, and queue-reappearance branches; those
-  tests are not a substitute for the exact live release candidate.
-- Active-task queue receipts intentionally use end-state rather than per-turn
-  filesystem attribution: their workspace interval includes the selected active
-  owner. Exact queued input/turn/result and final checks are enforced, while
-  callers needing causal changed-path isolation must use idle `continue`.
-- The earlier Codex 0.124.0 qualification attempt remains recorded as blocked
-  before dispatch because the host configured unsupported reasoning value
-  `ultra`; it is not evidence for or against 0.149.0.
-- Hermes skill discovery and loading passed in an isolated home, but a live
-  Hermes-model-to-tool-to-Codex run remains unqualified.
-- Desktop Local Projects and Desktop UI automation are outside this milestone.
+- This is a pre-alpha local operator, not an OS sandbox or security audit.
+- The public CI suite uses a scripted App Server and synthetic workspaces.
+- Live Codex evidence exists only for macOS arm64 and Codex `0.149.0`.
+- Idle `continue` and read-only catalog/adopt/watch have synthetic coverage but
+  no separately recorded live qualification.
+- A full Hermes-model → operator → Codex conversation remains unqualified.
+- Queue receipts prove final scope, not per-turn filesystem causality while an
+  owner turn writes concurrently.
+- Desktop Local Projects, UI automation, daemon delivery, Kanban, and general
+  multi-agent routing remain outside this repository.
+
+See [Quality and reliability](QUALITY.md) and
+[Compatibility](COMPATIBILITY.md) for the evidence matrix.

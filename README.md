@@ -72,7 +72,8 @@ flowchart LR
 
 The project is deliberately two small pieces, not another giant orchestrator:
 
-1. `hermes-codex`, a dependency-free Python lifecycle CLI for Codex App Server;
+1. `hermes-codex`, a small Python lifecycle CLI for Codex App Server, with one
+   pinned runtime dependency (`websockets`) for the managed Unix-socket queue;
 2. `skills/hermes-codex-operator`, a lightweight Hermes skill that teaches the
    agent how to plan, dispatch, monitor, verify, and report.
 
@@ -118,6 +119,11 @@ transport-neutral local outbox. Delivery remains the host application's job.
 This table is a product contract: the README does not advertise roadmap items
 as finished features.
 
+For the exact evidence behind each claim, read
+[Quality and reliability](docs/QUALITY.md). It separates synthetic CI, live
+Codex qualification, stable surfaces, experimental surfaces, and explicit
+non-guarantees.
+
 ## Quick start
 
 Requirements:
@@ -125,6 +131,11 @@ Requirements:
 - Python 3.11 through 3.14;
 - an installed and authenticated Codex CLI with App Server support;
 - Hermes Agent only if you want the conversational agent workflow.
+
+`python -m pip install .` installs the pinned `websockets==15.0.1` dependency
+used by the experimental managed-daemon queue path.
+Confirm that the interpreter used to create the environment is in range—for
+example, `python3 --version` must not report the macOS system Python 3.9.
 
 Clone the repository and install the core CLI:
 
@@ -267,9 +278,12 @@ connection-local, owner and target completion are proven with bounded exact
 queues can be consumed automatically by Codex after the owner turn becomes
 terminal; `thread/queue/start` is used only after a bounded readback still shows
 the exact submission queued. Both automatic consumption and the manual fallback
-have synthetic coverage. The current managed-daemon CLI path still requires an
-explicit live qualification on the exact release commit; every other Codex
-version requires separate qualification too.
+have synthetic coverage. On 2026-08-26 the public managed-daemon CLI path
+passed an opt-in macOS arm64 live smoke against Codex `0.149.0`: one submission
+reached exact verified readback and a restarted invocation returned
+`dispatched=false`. That evidence does not identify which consumption branch
+Codex used, and every other Codex version or operating system requires separate
+qualification.
 
 Generic `recover` and `collect` deliberately cannot promote a stuck queue
 operation to success. Repeating it only observes durable state. The simple
@@ -381,12 +395,13 @@ publication.
 
 ## Project status
 
-The current source tree is a pre-alpha `v0.1.0` release candidate, not a
-published-release claim. Its protocol and failure
-behavior have a comprehensive scripted suite, while live compatibility is
-qualified separately for each Codex CLI, Hermes, Python, and OS combination.
-Unqualified combinations are targets, not support claims. See
-[COMPATIBILITY.md](docs/COMPATIBILITY.md) and [ROADMAP.md](docs/ROADMAP.md).
+The latest published tag is `v0.0.1`. The current source tree is a pre-alpha
+`v0.1.0` candidate, not a claim that `v0.1.0` has been released. Its protocol
+and failure behavior have a comprehensive scripted suite, while live
+compatibility is qualified separately for each Codex CLI, Hermes, Python, and
+OS combination. Unqualified combinations are targets, not support claims. See
+[QUALITY.md](docs/QUALITY.md), [COMPATIBILITY.md](docs/COMPATIBILITY.md), and
+[ROADMAP.md](docs/ROADMAP.md).
 
 The integration uses the official
 [Codex App Server protocol](https://developers.openai.com/codex/app-server),
@@ -480,6 +495,12 @@ Operator не является фоновым диспетчером, полно
 - установленный и авторизованный Codex CLI с App Server;
 - Hermes Agent, если нужен разговорный сценарий.
 
+Команда `python -m pip install .` автоматически установит закреплённую
+зависимость `websockets==15.0.1`, которая нужна экспериментальной очереди через
+управляемый App Server.
+Перед созданием окружения проверьте `python3 --version`: системный Python 3.9 в
+старых версиях macOS для проекта не подходит.
+
 ```bash
 git clone https://github.com/AlekseiUL/hermes-codex-operator.git
 cd hermes-codex-operator
@@ -550,7 +571,8 @@ Operator связывает хеш промпта, рабочую папку, т
 Подробности: [политика безопасности](SECURITY.md),
 [модель угроз](docs/THREAT_MODEL.md),
 [процедура публикации](docs/PRIVACY_RELEASE.md) и
-[совместимость](docs/COMPATIBILITY.md).
+[совместимость](docs/COMPATIBILITY.md). Честная матрица гарантий, проверок и
+ограничений собрана в [QUALITY.md](docs/QUALITY.md).
 
 ### Автор и ресурсы
 

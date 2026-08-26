@@ -1,56 +1,65 @@
 # Roadmap
 
-The product goal is a small, excellent Hermes specialist for Codex—not a new
-general-purpose harness.
+The product goal is a small, reliable Hermes specialist for Codex—not a new
+general-purpose harness. Items are marked by implementation state so planned
+work is never presented as shipped behavior.
 
-## v0.0.1 — reliable managed task
+## Shipped in `v0.0.1`
 
 - versioned WorkContract;
-- durable task/operation/thread/turn identity;
+- durable task, operation, thread, and turn identity;
 - at-most-once automatic dispatch;
-- exact Codex App Server readback;
+- authoritative Codex App Server readback;
 - changed-path scope and argv-only verification;
-- immutable, privacy-safe receipts;
-- lightweight Hermes technical-partner skill;
+- immutable privacy-safe receipts;
+- Hermes technical-partner skill;
 - local privacy and release gates.
 
-## v0.1 — observe work started elsewhere (implemented)
+## Implemented after `v0.0.1` — next tagged release
 
-Bounded `thread/list` discovery, exact-ID `adopt` / `watch`, restart-durable
-watches, and a transport-neutral completion-event outbox are implemented. The
-surface is read-only and does not create a second turn.
+### Observe work started elsewhere
 
-The host may consume the outbox and explain that exact task through its own
-channel without screen automation; transport delivery is not part of the core.
+- bounded `thread/list` discovery;
+- exact `catalog read`;
+- read-only `adopt` and restart-durable `watch`;
+- transport-neutral digest-only completion outbox.
 
-## v0.2 — optional Codex Desktop visibility
+These commands do not create, resume, or enqueue Codex work. Delivery through
+Telegram or another channel belongs to the host Hermes agent.
 
-Before Desktop integration, the portable core implements two separate bounded
-mutations: stable `continue` for one exact idle thread, and an experimental
-exact-version `queue` path for one proven active loaded thread. Queue is
-allowlisted only for Codex 0.149.0, is never a continuation fallback, and has
-synthetic failure-path coverage. A historical same-adapter mutation passed on
-macOS; the managed-daemon proxy CLI still requires exact-commit live
-qualification. Project discovery and Desktop automation remain outside these
-slices.
+### Continue or queue one exact existing task
+
+- stable `continue` for one exact idle thread;
+- experimental exact-version `queue` for one active thread loaded in the same
+  managed App Server;
+- direct managed Unix-socket transport for queue operations;
+- exact message/turn correlation, authoritative completion, and restart
+  non-dispatch.
+
+The queue path is qualified only for Codex `0.149.0` on the tested macOS host.
+It is not a fallback for `continue`, and its final workspace evidence cannot
+attribute each changed file to one concurrent turn.
+
+## Candidate: optional Codex Desktop visibility
 
 Investigate a version-gated macOS adapter for creating or associating visible
-Codex Desktop projects and tasks. Prefer documented APIs or supported app state.
-Accessibility automation is a fallback, not the portable core, and direct
+Codex Desktop projects and tasks. Prefer documented APIs or supported app
+state. Accessibility automation is a fallback, not the portable core. Direct
 writes to private Codex databases remain out of scope.
 
-## v0.3 — durable host recipes
+## Candidate: durable host recipes
 
-Publish narrow recipes for placing the foreground operator inside an existing
-Hermes worker or gateway so completion notifications survive a process restart.
-The core should remain daemon-free.
+Publish narrow recipes for running the foreground operator inside an existing
+Hermes worker or gateway when completion delivery must survive a process
+restart. The portable core should remain daemon-free and transport-neutral.
 
-## Ongoing
+## Ongoing qualification
 
-- qualify current Codex CLI/App Server versions;
-- test Python and operating-system matrices;
+- qualify new Codex CLI/App Server versions one at a time;
+- keep Python and OS matrices green;
+- add live evidence only for exact surfaces actually exercised;
 - improve receipts and diagnostics without storing private payloads;
-- add focused adapters only when a real user workflow justifies them.
+- add adapters only when a real workflow justifies their maintenance cost.
 
 ## Explicitly not planned
 
