@@ -81,6 +81,41 @@ class AppServerProtocolTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await adapter.close()
 
+    async def test_catalog_paginates_with_strict_read_only_protocol(self) -> None:
+        adapter = self.adapter("catalog_pages")
+        try:
+            first = await adapter.list_threads(limit=1)
+            second = await adapter.list_threads(cursor=first.next_cursor, limit=1)
+            self.assertEqual(first.threads[0].thread_id, THREAD_ID)
+            self.assertEqual(first.threads[0].turn_ids, (TURN_ID,))
+            self.assertEqual(first.next_cursor, "cursor-synthetic-2")
+            self.assertEqual(second.threads[0].thread_id, "thread-synthetic-002")
+            self.assertIsNone(second.next_cursor)
+        finally:
+            await adapter.close()
+
+    async def test_catalog_rejects_malformed_thread_rows(self) -> None:
+        adapter = self.adapter("catalog_malformed")
+        try:
+            with self.assertRaises(ProtocolIntegrityError):
+                await adapter.list_threads(limit=1)
+        finally:
+            await adapter.close()
+
+    async def test_catalog_reads_exact_thread_without_resuming_it(self) -> None:
+        adapter = self.adapter("catalog_read")
+        try:
+            readback = await adapter.read_thread(THREAD_ID)
+            self.assertEqual(readback.thread.thread_id, THREAD_ID)
+            self.assertEqual(readback.thread.turn_ids, (TURN_ID,))
+            self.assertEqual(readback.turns[0].status, "completed")
+            self.assertEqual(
+                readback.turns[0].final_text,
+                "Synthetic verified implementation report.",
+            )
+        finally:
+            await adapter.close()
+
     async def test_missing_exact_turn_is_not_replaced_by_another_turn(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_name:
             adapter = self.adapter("missing_exact_turn")

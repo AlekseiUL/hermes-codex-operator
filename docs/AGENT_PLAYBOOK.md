@@ -165,13 +165,17 @@ the requested outcome was actually achieved.
 These are reliability boundaries, not a personality full of warnings. For
 ordinary approved work, the agent should act directly and report clearly.
 
-## Current limitation: manually started tasks
+## Manually started tasks
 
-The portable core can start and follow tasks that it owns. It cannot yet adopt
-a task manually started in Codex Desktop or another Codex client. That requires
-an `adopt/watch` adapter which can discover a specific existing thread and turn
-without guessing. This is on the roadmap and should not be simulated with UI
-clicking or repeated broad searches.
+The portable core can list bounded App Server catalog pages, read one exact
+thread to discover its turn IDs, and adopt a task only when both exact
+`threadId` and `turnId` are known. Raw result text from `catalog read` requires
+explicit `--include-result`. `catalog`, `adopt`, and `watch` never resume or
+start a thread or turn. A watch survives restart and
+creates one transport-neutral completion event with the authoritative result
+digest. If identity is missing, duplicated, or conflicting, report `UNKNOWN`;
+do not guess, click the UI, or dispatch. The package has no daemon and does not
+deliver the outbox through Telegram or another transport.
 
 ## Installation
 

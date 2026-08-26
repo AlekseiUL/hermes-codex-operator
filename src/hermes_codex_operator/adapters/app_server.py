@@ -20,7 +20,11 @@ from .base import (
     RemoteRequestError,
     RemoteTurnFailed,
     ThreadHandle,
+    CatalogTurn,
+    ThreadCatalogReadback,
     ThreadOptions,
+    ThreadPage,
+    ThreadSummary,
     TurnHandle,
     TurnInProgress,
     TurnOptions,
@@ -65,7 +69,7 @@ class AppServerAdapter:
         stderr_limit_bytes: int = 64 * 1024,
         stdout_line_limit_bytes: int = 4 * 1024 * 1024,
         client_name: str = "hermes-codex-operator",
-        client_version: str = "0.0.1",
+        client_version: str = "0.1.0",
     ) -> None:
         self._command = validate_command(command)
         if request_timeout <= 0 or shutdown_timeout <= 0:
@@ -205,6 +209,59 @@ class AppServerAdapter:
             options=chosen,
         )
         return ThreadHandle(thread_id=thread_id, workspace=workspace)
+
+    async def list_threads(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> ThreadPage:
+        """Read one bounded catalog page without resuming or mutating threads."""
+
+        await self._ensure_started()
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("thread/list limit must be an integer from 1 to 100")
+        params: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = self._nonempty_string(cursor, "cursor")
+        result = await self._request("thread/list", params, side_effect=False)
+        if not isinstance(result, Mapping):
+            raise ProtocolIntegrityError("thread/list result must be an object")
+        data = result.get("data")
+        if not isinstance(data, list):
+            raise ProtocolIntegrityError("thread/list result.data must be an array")
+        if len(data) > limit:
+            raise ProtocolIntegrityError("thread/list returned more rows than requested")
+        raw_cursor = result.get("nextCursor")
+        if raw_cursor is not None and not isinstance(raw_cursor, str):
+            raise ProtocolIntegrityError("thread/list nextCursor must be a string or null")
+        if raw_cursor == "":
+            raise ProtocolIntegrityError("thread/list nextCursor must not be empty")
+        summaries = tuple(self._parse_thread_summary(item) for item in data)
+        identities = tuple(item.thread_id for item in summaries)
+        if len(set(identities)) != len(identities):
+            raise ProtocolIntegrityError("thread/list returned duplicate thread ids")
+        return ThreadPage(summaries, raw_cursor)
+
+    async def read_thread(self, thread_id: str) -> ThreadCatalogReadback:
+        """Read one exact stored thread without resuming or subscribing to it."""
+
+        await self._ensure_started()
+        expected = self._nonempty_string(thread_id, "thread_id")
+        result = await self._request(
+            "thread/read",
+            {"threadId": expected, "includeTurns": True},
+            side_effect=False,
+        )
+        thread = self._result_object(result, "thread/read", "thread")
+        summary = self._parse_thread_summary(thread)
+        if summary.thread_id != expected:
+            raise ProtocolIntegrityError("thread/read returned a different thread id")
+
+        raw_turns = thread.get("turns")
+        assert isinstance(raw_turns, list)  # validated by _parse_thread_summary
+        turns = tuple(self._parse_catalog_turn(turn) for turn in raw_turns)
+        identities = tuple(turn.turn_id for turn in turns)
+        if len(set(identities)) != len(identities):
+            raise ProtocolIntegrityError("thread/read returned duplicate turn ids")
+        return ThreadCatalogReadback(summary, turns)
 
     async def resume_thread(
         self,
@@ -869,6 +926,77 @@ class AppServerAdapter:
         if not isinstance(thread.get("preview"), str):
             raise ProtocolIntegrityError(f"{method} thread.preview must be a string")
         return thread_id
+
+    def _parse_thread_summary(self, value: Any) -> ThreadSummary:
+        if not isinstance(value, Mapping):
+            raise ProtocolIntegrityError("thread/list data contains a non-object")
+        thread_id = self._nonempty_string(value.get("id"), "thread/list thread.id")
+        cwd_raw = self._nonempty_string(value.get("cwd"), "thread/list thread.cwd")
+        cwd = Path(cwd_raw)
+        if not cwd.is_absolute():
+            raise ProtocolIntegrityError("thread/list thread.cwd must be absolute")
+        preview = value.get("preview")
+        if not isinstance(preview, str):
+            raise ProtocolIntegrityError("thread/list thread.preview must be a string")
+        status_value = value.get("status")
+        if isinstance(status_value, Mapping):
+            status = self._nonempty_string(status_value.get("type"), "thread/list status.type")
+        elif isinstance(status_value, str) and status_value:
+            status = status_value
+        else:
+            raise ProtocolIntegrityError("thread/list thread.status is invalid")
+        timestamps: list[int] = []
+        for field in ("createdAt", "updatedAt"):
+            raw = value.get(field)
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+                raise ProtocolIntegrityError(f"thread/list thread.{field} must be non-negative")
+            timestamps.append(raw)
+        raw_turns = value.get("turns")
+        if not isinstance(raw_turns, list):
+            raise ProtocolIntegrityError("thread/list thread.turns must be an array")
+        turn_ids: list[str] = []
+        for turn in raw_turns:
+            if not isinstance(turn, Mapping):
+                raise ProtocolIntegrityError("thread/list thread.turns contains a non-object")
+            turn_ids.append(self._nonempty_string(turn.get("id"), "thread/list turn.id"))
+        if len(set(turn_ids)) != len(turn_ids):
+            raise ProtocolIntegrityError("thread/list thread contains duplicate turn ids")
+        return ThreadSummary(
+            thread_id=thread_id,
+            cwd=cwd,
+            preview=preview,
+            status=status,
+            created_at=timestamps[0],
+            updated_at=timestamps[1],
+            turn_ids=tuple(turn_ids),
+        )
+
+    def _parse_catalog_turn(self, value: Any) -> CatalogTurn:
+        if not isinstance(value, Mapping):
+            raise ProtocolIntegrityError("thread/read thread.turns contains a non-object")
+        turn_id = self._nonempty_string(value.get("id"), "thread/read turn.id")
+        status = value.get("status")
+        if status not in _KNOWN_TURN_STATUSES:
+            raise ProtocolIntegrityError("thread/read turn has an unknown status")
+        raw_items = value.get("items")
+        if not isinstance(raw_items, list) or any(
+            not isinstance(item, Mapping) for item in raw_items
+        ):
+            raise ProtocolIntegrityError("thread/read turn.items must be an object array")
+        final_messages: list[str] = []
+        legacy_messages: list[str] = []
+        for item in raw_items:
+            if item.get("type") != "agentMessage":
+                continue
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            if item.get("phase") == "final_answer":
+                final_messages.append(text)
+            elif item.get("phase") is None:
+                legacy_messages.append(text)
+        candidates = final_messages or legacy_messages
+        return CatalogTurn(turn_id, status, candidates[-1] if candidates else None)
 
     @staticmethod
     def _validate_effective_cwd(value: Any, workspace: Path, field: str) -> None:

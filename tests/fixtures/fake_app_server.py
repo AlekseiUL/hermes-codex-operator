@@ -91,9 +91,14 @@ def turn_record(
     return record
 
 
-def thread_record(workspace: str, turns: list[dict[str, Any]]) -> dict[str, Any]:
+def thread_record(
+    workspace: str,
+    turns: list[dict[str, Any]],
+    *,
+    thread_id: str = THREAD_ID,
+) -> dict[str, Any]:
     return {
-        "id": THREAD_ID,
+        "id": thread_id,
         "cliVersion": "0.0.0-synthetic",
         "createdAt": 1,
         "updatedAt": 1,
@@ -139,7 +144,7 @@ def main() -> None:
     initialize = expect("initialize")
     assert initialize["params"]["clientInfo"]["name"] == "hermes-codex-operator"
     assert initialize["params"]["clientInfo"]["title"] == "Hermes Codex Operator"
-    assert initialize["params"]["clientInfo"]["version"] == "0.0.1"
+    assert initialize["params"]["clientInfo"]["version"] == "0.1.0"
     # Proves that the client starts its stdout reader before waiting on the
     # initialize response.
     send({"method": "account/updated", "params": {}})
@@ -154,6 +159,43 @@ def main() -> None:
     )
     initialized = expect("initialized")
     assert set(initialized) == {"method"}
+
+    if SCENARIO == "catalog_read":
+        read = expect("thread/read")
+        assert read["params"] == {"threadId": THREAD_ID, "includeTurns": True}
+        response(
+            read,
+            {"thread": thread_record(os.path.abspath("."), [turn_record()])},
+        )
+        wait_until_killed()
+
+    if SCENARIO in {"catalog_pages", "catalog_malformed"}:
+        first = expect("thread/list")
+        assert first["params"] == {"limit": 1}
+        if SCENARIO == "catalog_malformed":
+            response(first, {"data": [{"id": THREAD_ID}], "nextCursor": None})
+            wait_until_killed()
+        response(
+            first,
+            {
+                "data": [thread_record(os.path.abspath("."), [turn_record()])],
+                "nextCursor": "cursor-synthetic-2",
+            },
+        )
+        second = expect("thread/list")
+        assert second["params"] == {"limit": 1, "cursor": "cursor-synthetic-2"}
+        response(
+            second,
+            {
+                "data": [
+                    thread_record(
+                        os.path.abspath("."), [], thread_id="thread-synthetic-002"
+                    )
+                ],
+                "nextCursor": None,
+            },
+        )
+        wait_until_killed()
 
     expected_thread_method = (
         "thread/resume" if SCENARIO in {"resume", "resume_read_only"} else "thread/start"

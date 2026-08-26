@@ -149,6 +149,98 @@ class CliTests(unittest.TestCase):
             self.assertEqual(json.loads(output.getvalue())["status"], "FAILED")
             self.assertEqual(backend.start_turn_calls, 0)
 
+    def test_catalog_adopt_watch_and_event_outbox_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            state = root_path / "state.sqlite3"
+            backend = FakeBackend()
+            backend.threads[backend.thread_id] = root_path
+            backend.turns[(backend.thread_id, backend.turn_id)] = "completed"
+            factory = lambda: FakeCodexAdapter(backend)
+
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    ["--state", str(state), "catalog", "--json"],
+                    adapter_factory=factory,
+                )
+            catalog = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(catalog["threads"][0]["thread_id"], backend.thread_id)
+
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--state", str(state), "catalog", "read",
+                        backend.thread_id, "--json",
+                    ],
+                    adapter_factory=factory,
+                )
+            readback = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(readback["thread"]["turns"][0]["turn_id"], backend.turn_id)
+            self.assertIsNone(readback["thread"]["turns"][0]["result"])
+            self.assertIsNotNone(readback["thread"]["turns"][0]["result_sha256"])
+
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--state", str(state), "catalog", "read",
+                        backend.thread_id, "--include-result", "--json",
+                    ],
+                    adapter_factory=factory,
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                json.loads(output.getvalue())["thread"]["turns"][0]["result"],
+                backend.final_text,
+            )
+
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--state", str(state), "adopt", "--json",
+                        backend.thread_id, backend.turn_id,
+                    ],
+                    adapter_factory=factory,
+                )
+            adopted = json.loads(output.getvalue())
+            self.assertEqual(code, 0)
+            self.assertEqual(adopted["watches"][0]["status"], "COMPLETED")
+            self.assertEqual(len(adopted["events"]), 1)
+            watch_id = adopted["watches"][0]["watch_id"]
+            event_id = adopted["events"][0]["event_id"]
+
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    ["--state", str(state), "watch", "--json", watch_id],
+                    adapter_factory=factory,
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue())["events"], [])
+
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(["--state", str(state), "events", "list", "--json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue())["events"][0]["event_id"], event_id)
+
+            output = StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    ["--state", str(state), "events", "ack", event_id, "--json"]
+                )
+            self.assertEqual(code, 0)
+            self.assertIsNotNone(json.loads(output.getvalue())["event"]["acked_at"])
+            self.assertEqual(backend.start_thread_calls, 0)
+            self.assertEqual(backend.resume_thread_calls, 0)
+            self.assertEqual(backend.start_turn_calls, 0)
+            self.assertEqual(backend.read_thread_calls, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

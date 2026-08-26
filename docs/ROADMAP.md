@@ -14,16 +14,14 @@ general-purpose harness.
 - lightweight Hermes technical-partner skill;
 - local privacy and release gates.
 
-## v0.1 — observe work started elsewhere
+## v0.1 — observe work started elsewhere (implemented)
 
-Design and validate explicit `adopt` / `watch` commands for a known existing
-Codex thread or turn. Discovery must be specific enough to avoid attaching to
-the wrong task. The first version should be read-only and should not create a
-second turn.
+Bounded `thread/list` discovery, exact-ID `adopt` / `watch`, restart-durable
+watches, and a transport-neutral completion-event outbox are implemented. The
+surface is read-only and does not create a second turn.
 
-Success means a Hermes agent can say, “that exact Codex task finished,” return
-the authoritative result, and explain it through Telegram without relying on
-screen automation.
+The host may consume the outbox and explain that exact task through its own
+channel without screen automation; transport delivery is not part of the core.
 
 ## v0.2 — optional Codex Desktop visibility
 

@@ -95,13 +95,12 @@ use a source checkout for the complete Hermes integration shown below.
 
 When Hermes owns the Telegram conversation, no Telegram code is needed in this
 repository: the foreground operator returns a structured result and Hermes
-sends the final message through its existing channel. Crash-independent push
-notifications or watching tasks that were started manually require an external
-durable worker; see the capability table below.
+sends the final message through its existing channel. Completion events for an exact manually started turn are stored durably in a
+transport-neutral local outbox. Delivery remains the host application's job.
 
 ## What is available today
 
-| Capability | v0.0.1 status |
+| Capability | v0.1.0 status |
 |---|---|
 | Clarify an idea; propose architecture, options, decomposition, and acceptance criteria | Included in the Hermes skill |
 | Start a new Codex task or continue the same task context | Implemented in the core |
@@ -110,7 +109,7 @@ durable worker; see the capability table below.
 | Durable status, conservative recovery, immutable receipts | Implemented in the core |
 | Explain the result and send it through Telegram or another Hermes channel | Provided by the host Hermes agent |
 | Add selected research or team artifacts to a brief | Supported as a Hermes workflow; automatic cross-agent crawling is not included |
-| Watch a Codex task that was started manually outside the operator | Roadmap: `adopt` / `watch` |
+| Catalog threads and watch an exact manually started turn | Implemented read-only with durable completion events |
 | Create visible Codex Desktop projects and tasks | Roadmap: optional, version-gated desktop adapter |
 | Background daemon, Kanban, general multi-agent routing, or multi-harness execution | Intentionally not included |
 
@@ -180,6 +179,28 @@ hermes-codex status widget-health-001 --json
 hermes-codex recover --contract work-contract.json --allow-root /absolute/path/to/projects --json
 hermes-codex collect --contract work-contract.json --allow-root /absolute/path/to/projects --json
 ```
+
+Read-only catalog and exact-ID watch commands never resume or start Codex work:
+
+```bash
+hermes-codex catalog --json
+hermes-codex catalog read THREAD_ID --json
+hermes-codex catalog read THREAD_ID --include-result --json
+hermes-codex adopt THREAD_ID TURN_ID --json
+hermes-codex watch WATCH_ID --json
+hermes-codex events list --json
+hermes-codex events ack EVENT_ID --json
+```
+
+`catalog` is bounded to 20 pages and 1,000 threads. `catalog read` performs an
+exact read-only `thread/read` and exposes turn IDs plus result digests; raw
+result text requires explicit `--include-result`. `adopt` requires both exact
+IDs and verifies them through `thread/read`. Watches survive process restart;
+one terminal watch creates exactly one event containing the result digest, not
+the raw result. Missing, duplicate, or conflicting identity becomes `UNKNOWN`
+without dispatch. Event acknowledgement is idempotent. There is no daemon or
+delivery transport in the package, so callers poll `watch` and consume the
+outbox themselves.
 
 For a follow-up, keep `task_id` and use a new `operation_id`. That resumes the
 same Codex thread. Never reuse an operation ID with different instructions.
@@ -272,7 +293,7 @@ publication.
 
 ## Project status
 
-`v0.0.1` is a pre-alpha clean-room implementation. Its protocol and failure
+`v0.1.0` is a pre-alpha clean-room implementation. Its protocol and failure
 behavior have a comprehensive scripted suite, while live compatibility is
 qualified separately for each Codex CLI, Hermes, Python, and OS combination.
 Unqualified combinations are targets, not support claims. See
@@ -331,7 +352,7 @@ Server. Вы формулируете задачу обычным языком. 
 Нужно знать, какой именно запуск выполнился, что он изменил, какие проверки
 реально прошли и не отправилась ли одна задача дважды.
 
-### Что уже работает в v0.0.1
+### Что уже работает в v0.1.0
 
 - новый запуск Codex и продолжение того же контекста;
 - постоянные идентификаторы задачи, операции, потока и запуска;
@@ -343,11 +364,13 @@ Server. Вы формулируете задачу обычным языком. 
 - неизменяемый receipt с хешами и результатами проверок;
 - отдельный Hermes skill для подготовки, запуска, контроля и объяснения
   результата.
+- ограниченный каталог потоков, read-only подключение по точным `threadId` и
+  `turnId`, постоянные watches и локальный outbox событий завершения;
 
 Operator не является фоновым диспетчером, полноценной песочницей или заменой
-человеческой приёмки. Он пока не подхватывает задачи, которые были вручную
-запущены в Codex Desktop, и не создаёт Desktop Projects. Эти возможности
-отделены в [roadmap](docs/ROADMAP.md).
+человеческой приёмки. Он может наблюдать только точный уже известный поток и
+запуск через App Server; Desktop Projects и управление интерфейсом не входят в
+пакет.
 
 ### Быстрый старт
 

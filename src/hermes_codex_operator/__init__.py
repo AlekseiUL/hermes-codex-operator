@@ -23,14 +23,17 @@ from .models import (
     WorkContract,
 )
 from .engine import Operator, OperatorOutcome
+from .catalog import CatalogOperator, CatalogResult, WatchPollResult
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 __all__ = [
     "BaselineConflict",
     "BindingConflict",
     "ChangedPathEvidence",
     "ContractValidationError",
+    "CatalogOperator",
+    "CatalogResult",
     "Finalization",
     "IdempotencyConflict",
     "InvalidTransition",
@@ -47,5 +50,6 @@ __all__ = [
     "TaskBusy",
     "VerificationEvidence",
     "WorkContract",
+    "WatchPollResult",
     "__version__",
 ]

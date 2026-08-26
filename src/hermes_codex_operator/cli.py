@@ -11,9 +11,10 @@ from typing import Sequence
 
 from .adapters.app_server import AppServerAdapter
 from .adapters.base import AdapterError, CodexAdapter
+from .catalog import CatalogOperator
 from .engine import AdapterFactory, Operator, OperatorOutcome
-from .journal import JournalError, SQLiteJournal
-from .models import ContractValidationError, WorkContract
+from .journal import CompletionEvent, JournalError, SQLiteJournal, WatchRecord
+from .models import ContractValidationError, WorkContract, sha256_text
 from .workspace import WorkspacePolicy
 
 
@@ -59,6 +60,54 @@ def _parser() -> argparse.ArgumentParser:
         "--json", dest="command_json", action="store_true", help=argparse.SUPPRESS
     )
     status.add_argument("operation_id")
+
+    catalog = commands.add_parser("catalog", help="list Codex threads read-only")
+    catalog.add_argument("--json", dest="command_json", action="store_true", help=argparse.SUPPRESS)
+    catalog.add_argument("--page-size", type=int, default=50)
+    catalog.add_argument("--max-pages", type=int, default=20)
+    catalog.add_argument("--cursor")
+    catalog_commands = catalog.add_subparsers(dest="catalog_command")
+    catalog_read = catalog_commands.add_parser("read", help="read one exact thread")
+    catalog_read.add_argument("thread_id")
+    catalog_read.add_argument("--include-result", action="store_true")
+    catalog_read.add_argument(
+        "--json",
+        dest="command_json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+
+    adopt = commands.add_parser("adopt", help="adopt an exact thread and turn read-only")
+    adopt.add_argument("--json", dest="command_json", action="store_true", help=argparse.SUPPRESS)
+    adopt.add_argument("thread_id")
+    adopt.add_argument("turn_id")
+
+    watch = commands.add_parser("watch", help="poll durable exact-ID watches")
+    watch.add_argument("--json", dest="command_json", action="store_true", help=argparse.SUPPRESS)
+    watch.add_argument("watch_id", nargs="?")
+
+    events = commands.add_parser("events", help="list or acknowledge completion events")
+    events.add_argument("--json", dest="command_json", action="store_true", help=argparse.SUPPRESS)
+    event_commands = events.add_subparsers(dest="events_command", required=True)
+    event_list = event_commands.add_parser("list", help="list completion events")
+    event_list.add_argument(
+        "--json",
+        dest="command_json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    event_list.add_argument("--all", action="store_true", dest="include_acked")
+    event_ack = event_commands.add_parser("ack", help="acknowledge one completion event")
+    event_ack.add_argument(
+        "--json",
+        dest="command_json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    event_ack.add_argument("event_id")
     return parser
 
 
@@ -94,6 +143,32 @@ def _operation_dict(operation: object) -> dict[str, object]:
         "failure_code": getattr(operation, "failure_code"),
         "created_at": getattr(operation, "created_at"),
         "updated_at": getattr(operation, "updated_at"),
+    }
+
+
+def _watch_dict(watch: WatchRecord) -> dict[str, object]:
+    return {
+        "watch_id": watch.watch_id,
+        "thread_id": watch.thread_id,
+        "turn_id": watch.turn_id,
+        "status": watch.state,
+        "result_sha256": watch.result_sha256,
+        "failure_code": watch.failure_code,
+        "created_at": watch.created_at,
+        "updated_at": watch.updated_at,
+    }
+
+
+def _event_dict(event: CompletionEvent) -> dict[str, object]:
+    return {
+        "event_id": event.event_id,
+        "watch_id": event.watch_id,
+        "thread_id": event.thread_id,
+        "turn_id": event.turn_id,
+        "status": event.status,
+        "result_sha256": event.result_sha256,
+        "created_at": event.created_at,
+        "acked_at": event.acked_at,
     }
 
 
@@ -165,6 +240,86 @@ def main(
         with SQLiteJournal(args.state) as journal:
             if args.command == "status":
                 value = _operation_dict(journal.get_operation(args.operation_id))
+            elif args.command == "events":
+                if args.events_command == "ack":
+                    value = {"ok": True, "event": _event_dict(journal.ack_event(args.event_id))}
+                else:
+                    value = {
+                        "ok": True,
+                        "events": [
+                            _event_dict(item)
+                            for item in journal.list_events(include_acked=args.include_acked)
+                        ],
+                    }
+            elif args.command in {"catalog", "adopt", "watch"}:
+                factory = adapter_factory or (lambda: AppServerAdapter())
+                catalog_operator = CatalogOperator(journal, factory)
+                if args.command == "catalog":
+                    if args.catalog_command == "read":
+                        result = asyncio.run(catalog_operator.read(args.thread_id))
+                        value = {
+                            "ok": True,
+                            "thread": {
+                                "thread_id": result.thread.thread_id,
+                                "cwd": str(result.thread.cwd),
+                                "preview": result.thread.preview,
+                                "status": result.thread.status,
+                                "created_at": result.thread.created_at,
+                                "updated_at": result.thread.updated_at,
+                                "turns": [
+                                    {
+                                        "turn_id": turn.turn_id,
+                                        "status": turn.status,
+                                        "result_sha256": (
+                                            sha256_text(turn.final_text)
+                                            if turn.final_text is not None
+                                            else None
+                                        ),
+                                        "result": (
+                                            turn.final_text if args.include_result else None
+                                        ),
+                                    }
+                                    for turn in result.turns
+                                ],
+                            },
+                        }
+                    else:
+                        result = asyncio.run(
+                            catalog_operator.catalog(
+                                page_size=args.page_size,
+                                max_pages=args.max_pages,
+                                cursor=args.cursor,
+                            )
+                        )
+                        value = {
+                            "ok": True,
+                            "threads": [
+                                {
+                                    "thread_id": item.thread_id,
+                                    "cwd": str(item.cwd),
+                                    "preview": item.preview,
+                                    "status": item.status,
+                                    "created_at": item.created_at,
+                                    "updated_at": item.updated_at,
+                                    "turn_ids": list(item.turn_ids),
+                                }
+                                for item in result.threads
+                            ],
+                            "pages_read": result.pages_read,
+                            "truncated": result.truncated,
+                            "next_cursor": result.next_cursor,
+                        }
+                else:
+                    result = asyncio.run(
+                        catalog_operator.adopt(args.thread_id, args.turn_id)
+                        if args.command == "adopt"
+                        else catalog_operator.poll(args.watch_id)
+                    )
+                    value = {
+                        "ok": all(item.state != "UNKNOWN" for item in result.watches),
+                        "watches": [_watch_dict(item) for item in result.watches],
+                        "events": [_event_dict(item) for item in result.events],
+                    }
             else:
                 contract = _read_contract(args.contract)
                 roots = tuple(args.allow_root) or (Path.cwd(),)
@@ -182,6 +337,8 @@ def main(
                 value = _outcome_dict(outcome)
         _emit(value, as_json=as_json)
         status = value.get("status")
+        if args.command in {"catalog", "events", "watch", "adopt"}:
+            return 0 if value.get("ok") else 3
         return 0 if status == "VERIFIED" or args.command == "status" else 3
     except (
         OSError,

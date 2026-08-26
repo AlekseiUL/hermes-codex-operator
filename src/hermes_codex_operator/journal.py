@@ -14,6 +14,7 @@ import errno
 import json
 import os
 from pathlib import Path
+import secrets
 import sqlite3
 import stat
 import threading
@@ -33,7 +34,9 @@ from .models import (
 from .workspace import WorkspaceSnapshot, snapshot_from_dict, snapshot_to_dict
 
 
-DATABASE_VERSION = 1
+DATABASE_VERSION = 2
+WATCH_STATES = frozenset({"ACTIVE", "COMPLETED", "FAILED", "INTERRUPTED", "UNKNOWN"})
+WATCH_TERMINAL_STATES = WATCH_STATES - {"ACTIVE"}
 
 
 class JournalError(RuntimeError):
@@ -116,6 +119,30 @@ class Reservation:
 class Finalization:
     operation: OperationRecord
     receipt: Receipt
+
+
+@dataclass(frozen=True, slots=True)
+class WatchRecord:
+    watch_id: str
+    thread_id: str
+    turn_id: str
+    state: str
+    result_sha256: str | None
+    failure_code: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class CompletionEvent:
+    event_id: str
+    watch_id: str
+    thread_id: str
+    turn_id: str
+    status: str
+    result_sha256: str | None
+    created_at: str
+    acked_at: str | None
 
 
 def _utc_now() -> str:
@@ -217,7 +244,7 @@ class SQLiteJournal:
             version = int(
                 self._connection.execute("PRAGMA user_version").fetchone()[0]
             )
-            if version not in (0, DATABASE_VERSION):
+            if version not in (0, 1, DATABASE_VERSION):
                 raise JournalError("unsupported journal schema version")
             self._connection.execute(
                 """
@@ -305,6 +332,39 @@ class SQLiteJournal:
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS operations_task_id_idx ON operations(task_id)"
             )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS watches (
+                    watch_id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    result_sha256 TEXT,
+                    failure_code TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(thread_id, turn_id)
+                )
+                """
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS completion_events (
+                    event_id TEXT PRIMARY KEY,
+                    watch_id TEXT NOT NULL UNIQUE REFERENCES watches(watch_id),
+                    thread_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    result_sha256 TEXT,
+                    created_at TEXT NOT NULL,
+                    acked_at TEXT
+                )
+                """
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS completion_events_ack_idx "
+                "ON completion_events(acked_at, created_at)"
+            )
             try:
                 self._connection.execute(
                     """
@@ -321,7 +381,7 @@ class SQLiteJournal:
                 raise JournalError(
                     "journal already contains multiple open operations for one task"
                 ) from exc
-            if version == 0:
+            if version in (0, 1):
                 self._connection.execute(f"PRAGMA user_version = {DATABASE_VERSION}")
 
     def _tighten_permissions(self) -> None:
@@ -1045,6 +1105,166 @@ class SQLiteJournal:
                 raise RecordNotFound("receipt does not exist")
             return Receipt.from_json(row["receipt_json"])
 
+    @staticmethod
+    def _watch_from_row(row: sqlite3.Row) -> WatchRecord:
+        return WatchRecord(
+            watch_id=row["watch_id"], thread_id=row["thread_id"], turn_id=row["turn_id"],
+            state=row["state"], result_sha256=row["result_sha256"],
+            failure_code=row["failure_code"], created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _event_from_row(row: sqlite3.Row) -> CompletionEvent:
+        return CompletionEvent(
+            event_id=row["event_id"], watch_id=row["watch_id"],
+            thread_id=row["thread_id"], turn_id=row["turn_id"], status=row["status"],
+            result_sha256=row["result_sha256"], created_at=row["created_at"],
+            acked_at=row["acked_at"],
+        )
+
+    def adopt_watch(self, thread_id: str, turn_id: str) -> WatchRecord:
+        """Idempotently persist an exact read-only thread/turn identity."""
+
+        validate_external_id(thread_id, "thread_id")
+        validate_external_id(turn_id, "turn_id")
+        with self._transaction():
+            existing = self._connection.execute(
+                "SELECT * FROM watches WHERE thread_id = ? AND turn_id = ?",
+                (thread_id, turn_id),
+            ).fetchone()
+            if existing is not None:
+                return self._watch_from_row(existing)
+            now = _utc_now()
+            watch_id = "watch-" + secrets.token_hex(16)
+            self._connection.execute(
+                """
+                INSERT INTO watches(
+                    watch_id, thread_id, turn_id, state, result_sha256,
+                    failure_code, created_at, updated_at
+                ) VALUES (?, ?, ?, 'ACTIVE', NULL, NULL, ?, ?)
+                """,
+                (watch_id, thread_id, turn_id, now, now),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM watches WHERE watch_id = ?", (watch_id,)
+            ).fetchone()
+            assert row is not None
+            return self._watch_from_row(row)
+
+    def get_watch(self, watch_id: str) -> WatchRecord:
+        validate_external_id(watch_id, "watch_id")
+        with self._lock:
+            self._ensure_open()
+            row = self._connection.execute(
+                "SELECT * FROM watches WHERE watch_id = ?", (watch_id,)
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("watch does not exist")
+            return self._watch_from_row(row)
+
+    def list_watches(self, *, active_only: bool = False) -> tuple[WatchRecord, ...]:
+        with self._lock:
+            self._ensure_open()
+            sql = "SELECT * FROM watches"
+            if active_only:
+                sql += " WHERE state = 'ACTIVE'"
+            sql += " ORDER BY created_at, watch_id"
+            return tuple(self._watch_from_row(row) for row in self._connection.execute(sql))
+
+    def finish_watch(
+        self,
+        watch_id: str,
+        status: str,
+        *,
+        result_sha256: str | None = None,
+        failure_code: str | None = None,
+    ) -> tuple[WatchRecord, CompletionEvent]:
+        """Atomically terminalize a watch and insert its single outbox event."""
+
+        validate_external_id(watch_id, "watch_id")
+        if status not in WATCH_TERMINAL_STATES:
+            raise JournalError("watch terminal status is invalid")
+        if result_sha256 is not None and (
+            len(result_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in result_sha256)
+        ):
+            raise JournalError("result_sha256 must be a lowercase SHA-256 digest")
+        code = _failure_code(failure_code)
+        if status == "COMPLETED" and result_sha256 is None:
+            raise JournalError("completed watch requires result_sha256")
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT * FROM watches WHERE watch_id = ?", (watch_id,)
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("watch does not exist")
+            if row["state"] != "ACTIVE" and (
+                row["state"] != status
+                or row["result_sha256"] != result_sha256
+                or row["failure_code"] != code
+            ):
+                raise BindingConflict("watch already has a different terminal result")
+            now = _utc_now()
+            if row["state"] == "ACTIVE":
+                self._connection.execute(
+                    """
+                    UPDATE watches
+                    SET state = ?, result_sha256 = ?, failure_code = ?, updated_at = ?
+                    WHERE watch_id = ?
+                    """,
+                    (status, result_sha256, code, now, watch_id),
+                )
+            event_id = "event-" + sha256_text(
+                f"{watch_id}\0{status}\0{result_sha256 or ''}"
+            )[:32]
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO completion_events(
+                    event_id, watch_id, thread_id, turn_id, status,
+                    result_sha256, created_at, acked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (event_id, watch_id, row["thread_id"], row["turn_id"], status,
+                 result_sha256, now),
+            )
+            watch_row = self._connection.execute(
+                "SELECT * FROM watches WHERE watch_id = ?", (watch_id,)
+            ).fetchone()
+            event_row = self._connection.execute(
+                "SELECT * FROM completion_events WHERE watch_id = ?", (watch_id,)
+            ).fetchone()
+            assert watch_row is not None and event_row is not None
+            return self._watch_from_row(watch_row), self._event_from_row(event_row)
+
+    def list_events(self, *, include_acked: bool = False) -> tuple[CompletionEvent, ...]:
+        with self._lock:
+            self._ensure_open()
+            sql = "SELECT * FROM completion_events"
+            if not include_acked:
+                sql += " WHERE acked_at IS NULL"
+            sql += " ORDER BY created_at, event_id"
+            return tuple(self._event_from_row(row) for row in self._connection.execute(sql))
+
+    def ack_event(self, event_id: str) -> CompletionEvent:
+        validate_external_id(event_id, "event_id")
+        with self._transaction():
+            row = self._connection.execute(
+                "SELECT * FROM completion_events WHERE event_id = ?", (event_id,)
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("completion event does not exist")
+            if row["acked_at"] is None:
+                self._connection.execute(
+                    "UPDATE completion_events SET acked_at = ? WHERE event_id = ?",
+                    (_utc_now(), event_id),
+                )
+                row = self._connection.execute(
+                    "SELECT * FROM completion_events WHERE event_id = ?", (event_id,)
+                ).fetchone()
+                assert row is not None
+            return self._event_from_row(row)
+
     def close(self) -> None:
         with self._lock:
             if self._closed:
@@ -1067,6 +1287,7 @@ Journal = SQLiteJournal
 __all__ = [
     "BaselineConflict",
     "BindingConflict",
+    "CompletionEvent",
     "DATABASE_VERSION",
     "Finalization",
     "IdempotencyConflict",
@@ -1081,4 +1302,7 @@ __all__ = [
     "SQLiteJournal",
     "TaskRecord",
     "TaskBusy",
+    "WatchRecord",
+    "WATCH_STATES",
+    "WATCH_TERMINAL_STATES",
 ]

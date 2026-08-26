@@ -21,6 +21,7 @@ The core uses a documented v2 stdio protocol surface through the currently
 experimental `codex app-server` command:
 
 - `initialize` and `initialized`;
+- `thread/list` for bounded read-only catalog pages;
 - `thread/start` and `thread/resume`;
 - `turn/start` and matching `turn/completed` notifications;
 - `thread/read` with full turns for authoritative exact-turn readback.
@@ -29,6 +30,12 @@ The client does not opt into experimental API capabilities or methods. Unknown
 server requests and permission broadening fail closed. Because the executable
 surface itself is experimental, support is always tied to an exact qualified
 Codex CLI version rather than assumed across releases.
+
+`project/list` is deliberately excluded from v0.1.0. Catalog/read/adopt/watch do
+not call `thread/resume`, `thread/start`, or `turn/start`; they use only
+`thread/list` and authoritative `thread/read`. The release slice has both
+synthetic protocol coverage and a bounded read-only live smoke proving that
+catalog/read/adopt leaves the exact turn set unchanged.
 
 The official App Server documentation states that stdio uses newline-delimited
 JSON, requires the initialization handshake, and models conversation as

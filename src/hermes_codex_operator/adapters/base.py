@@ -148,8 +148,44 @@ class TurnReadback:
     items: tuple[Mapping[str, Any], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ThreadSummary:
+    thread_id: str
+    cwd: Path
+    preview: str
+    status: str
+    created_at: int
+    updated_at: int
+    turn_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadPage:
+    threads: tuple[ThreadSummary, ...]
+    next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogTurn:
+    turn_id: str
+    status: str
+    final_text: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadCatalogReadback:
+    thread: ThreadSummary
+    turns: tuple[CatalogTurn, ...]
+
+
 @runtime_checkable
 class CodexAdapter(Protocol):
+    async def list_threads(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> ThreadPage: ...
+
+    async def read_thread(self, thread_id: str) -> ThreadCatalogReadback: ...
+
     async def start_thread(
         self,
         workspace: Path,

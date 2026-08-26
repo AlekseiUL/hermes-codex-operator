@@ -52,9 +52,13 @@ Report one compact message through the user's current Hermes channel:
 - any blocker or uncertainty;
 - the single most useful next step.
 
-Do not claim that this skill can watch a manually started Codex task, create a
-Codex Desktop project, or provide crash-independent background notifications.
-Those capabilities need separate adapters.
+For a manually started task, use `catalog` only for bounded discovery, then
+`catalog read THREAD_ID` to discover exact turn IDs. Request raw result text
+only with explicit `--include-result`, and adopt only an exact `threadId` plus
+`turnId`. `adopt` and `watch` are read-only and
+write completion digests to a local event outbox; they do not deliver messages
+or run in the background. Do not claim that this skill can create a Codex
+Desktop project or provide a daemon or crash-independent push notification.
 
 Before constructing a contract or handling a non-success status, read
 [the operator protocol](references/operator-protocol.md).

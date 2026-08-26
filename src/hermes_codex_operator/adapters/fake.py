@@ -9,10 +9,14 @@ from .base import (
     AdapterTimeout,
     AppServerProcessError,
     DeliveryUnknown,
+    CatalogTurn,
     ReadbackMissingResult,
     RemoteTurnFailed,
     ThreadHandle,
+    ThreadCatalogReadback,
     ThreadOptions,
+    ThreadPage,
+    ThreadSummary,
     TurnHandle,
     TurnInProgress,
     TurnOptions,
@@ -35,7 +39,10 @@ class FakeBackend:
     resume_thread_calls: int = 0
     start_turn_calls: int = 0
     read_turn_calls: int = 0
+    read_thread_calls: int = 0
     last_workspace: Path | None = None
+    list_thread_calls: int = 0
+    list_pages: dict[str | None, ThreadPage] = field(default_factory=dict)
 
 
 class FakeCodexAdapter:
@@ -48,6 +55,54 @@ class FakeCodexAdapter:
     def _ensure_open(self) -> None:
         if self._closed:
             raise AdapterClosed("fake adapter is closed")
+
+    async def list_threads(
+        self, *, cursor: str | None = None, limit: int = 50
+    ) -> ThreadPage:
+        self._ensure_open()
+        self.backend.list_thread_calls += 1
+        page = self.backend.list_pages.get(cursor)
+        if page is not None:
+            return page
+        threads = tuple(
+            ThreadSummary(
+                thread_id=thread_id,
+                cwd=workspace,
+                preview="Synthetic thread",
+                status="idle",
+                created_at=1,
+                updated_at=1,
+                turn_ids=tuple(
+                    turn_id for candidate, turn_id in self.backend.turns if candidate == thread_id
+                ),
+            )
+            for thread_id, workspace in self.backend.threads.items()
+        )
+        return ThreadPage(threads[:limit], None)
+
+    async def read_thread(self, thread_id: str) -> ThreadCatalogReadback:
+        self._ensure_open()
+        self.backend.read_thread_calls += 1
+        workspace = self.backend.threads[thread_id]
+        turns = tuple(
+            CatalogTurn(
+                turn_id,
+                status,
+                self.backend.final_text if status == "completed" else None,
+            )
+            for (candidate, turn_id), status in self.backend.turns.items()
+            if candidate == thread_id
+        )
+        summary = ThreadSummary(
+            thread_id,
+            workspace,
+            "Synthetic thread",
+            "idle",
+            1,
+            1,
+            tuple(turn.turn_id for turn in turns),
+        )
+        return ThreadCatalogReadback(summary, turns)
 
     async def start_thread(
         self, workspace: Path, options: ThreadOptions | None = None
