@@ -221,6 +221,43 @@ class ContinuationOperatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(second.dispatched)
                 self.assertEqual(backend.start_turn_calls, 1)
 
+    async def test_returned_turn_binding_conflict_is_unknown_without_retry(self) -> None:
+        collision_turn = "turn-synthetic-collision"
+
+        class ConflictingJournal(SQLiteJournal):
+            def bind_turn(self, operation_id, turn_id):
+                super().bind_turn(operation_id, collision_turn)
+                return super().bind_turn(operation_id, turn_id)
+
+        self.journal.close()
+        self.journal = ConflictingJournal(self.database)
+        backend = self.backend()
+        contract = continuation_contract(self.workspace)
+
+        first = await self.operator(backend).continue_idle(
+            contract, thread_id=self.thread_id
+        )
+        duplicate = await self.operator(backend).continue_idle(
+            contract, thread_id=self.thread_id
+        )
+        reopened = SQLiteJournal(self.database)
+        try:
+            restarted = await self.operator(backend, journal=reopened).continue_idle(
+                contract, thread_id=self.thread_id
+            )
+        finally:
+            reopened.close()
+
+        self.assertEqual(first.operation.state, OperationState.UNKNOWN)
+        self.assertEqual(
+            first.operation.failure_code, "continuation_turn_binding_conflict"
+        )
+        self.assertTrue(first.dispatched)
+        self.assertFalse(duplicate.dispatched)
+        self.assertFalse(restarted.dispatched)
+        self.assertEqual(backend.resume_thread_calls, 1)
+        self.assertEqual(backend.start_turn_calls, 1)
+
     async def test_unexpected_multiple_new_turns_cannot_be_accepted(self) -> None:
         backend = self.backend()
 

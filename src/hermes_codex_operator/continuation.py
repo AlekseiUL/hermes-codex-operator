@@ -17,7 +17,7 @@ from .adapters.base import (
     TurnOptions,
 )
 from .engine import AdapterFactory, Operator, OperatorOutcome
-from .journal import SQLiteJournal
+from .journal import BindingConflict, SQLiteJournal
 from .models import OperationState, WorkContract, validate_external_id
 from .workspace import WorkspaceError, WorkspacePolicy, resolve_workspace, snapshot_workspace
 
@@ -114,7 +114,15 @@ class ContinuationOperator(Operator):
                         raise ProtocolIntegrityError(
                             "turn/start returned a different thread identity"
                         )
-                    self.journal.bind_turn(contract.operation_id, turn.turn_id)
+                    try:
+                        self.journal.bind_turn(contract.operation_id, turn.turn_id)
+                    except BindingConflict:
+                        return self._terminal_outcome(
+                            contract,
+                            OperationState.UNKNOWN,
+                            "continuation_turn_binding_conflict",
+                            dispatched=True,
+                        )
                     correlated = await adapter.read_thread(expected_thread)
                     self._validate_correlated_turn(
                         correlated.thread.turn_ids, baseline_ids, turn.turn_id
