@@ -16,6 +16,9 @@ Run the complete local gate:
 PYTHONPATH=src PYTHONWARNINGS=error::ResourceWarning \
   python3 -m unittest discover -s tests -v
 python3 scripts/privacy_gate.py . --mode tree
+python3 scripts/privacy_gate.py . --mode staged
+python3 scripts/privacy_gate.py . --mode history
+PYTHONPATH=src python3 scripts/docs_gate.py .
 python3 -m hermes_codex_operator --help
 ```
 
@@ -66,6 +69,12 @@ python3 scripts/live_queue_smoke.py --confirm-live-codex --owner-attempts 3
 preflight interruption is reported, and the harness still permits at most one
 queue submission. The queue harness requires the daemon to be started by the
 caller and never starts or stops it automatically.
+
+Do not run either live command casually. It can create real local Codex threads,
+consume account quota, and mutate its disposable synthetic workspace. Run live
+tests only with explicit authorization. After a runtime or protocol change,
+synthetic CI is necessary but not enough: rerun the relevant opt-in live smoke
+before extending a compatibility claim.
 
 Before claiming a release is ready, follow
 [PRIVACY_RELEASE.md](docs/PRIVACY_RELEASE.md).

@@ -6,6 +6,16 @@ All notable changes to this project will be documented here. The format follows
 
 ## [Unreleased]
 
+### Documentation
+
+- Reconcile README, compatibility, reviews, roadmap, RFC status, implementation
+  record, dependency declarations, live qualification, and actual GitHub
+  settings with the published runtime evidence.
+- Add a bounded quality matrix that separates guarantees, executed proof,
+  experimental surfaces, and explicit non-guarantees.
+- Add a CI documentation gate for local links and anchors, fenced blocks,
+  Mermaid presence, and documented top-level CLI commands.
+
 ### Added
 
 - Distinct `continue --thread-id` mutation for one exact existing idle task.

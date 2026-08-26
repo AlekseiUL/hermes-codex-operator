@@ -1,9 +1,11 @@
-# Hermes Codex Operator - Implementation Plan
+# Hermes Codex Operator — Implementation Record
 
 **Goal:** Build a clean-room local MVP that safely dispatches, tracks, reads,
 verifies, and receipts one Codex task lifecycle.
-**Dependencies:** Python 3.11 through 3.14, Git, and Codex CLI only for
-real-adapter tests.
+**Status:** Implemented; this file records the delivered steps and acceptance
+signals rather than future promises.
+**Dependencies:** Python 3.11 through 3.14, `websockets==15.0.1`, Git for
+repository evidence, and Codex CLI for real-adapter use and live tests.
 
 ### Step 1: Define versioned domain objects
 
@@ -105,9 +107,10 @@ turn correlation, exact readback, and repeat/restart behavior are covered.
 **Result:** One experimental 0.149.0 queue mutation; stable adapter remains
 `experimentalApi: false`, and queue never becomes continuation fallback.
 Synthetic tests cover automatic consumption and manual start. The earlier live
-smoke used one injected adapter and did not qualify the public managed-daemon
-proxy CLI or distinguish which consumption branch ran; the rewritten CLI smoke
-must run on the exact release commit.
+smoke used one injected adapter and did not qualify the public CLI. A later
+macOS arm64 smoke exercised the public managed-daemon direct Unix-socket path,
+verified the exact result, and proved restart non-dispatch. It did not
+distinguish which queue-consumption branch ran.
 
 ### Step 7: Add privacy and release gates
 
@@ -129,4 +132,5 @@ reviewer, resolve findings, then test from a fresh temporary clone/archive.
 scripts/privacy_gate.py .`
 **Check:** Review has no unresolved release blocker and clean test passes
 without private infrastructure.
-**Result:** Evidence-backed local MVP ready for the user's publication decision.
+**Result:** Evidence-backed local MVP published as pre-alpha source; the next
+tag remains a separate maintainer decision.

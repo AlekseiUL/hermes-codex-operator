@@ -66,6 +66,10 @@ jobs:
           python-version: "3.14"
       - name: Install pinned build frontend
         run: python -m pip install build==1.5.0 setuptools==84.0.0
+      - name: Check documentation links, fences, diagrams, and CLI examples
+        env:
+          PYTHONPATH: src
+        run: python scripts/docs_gate.py .
       - name: Record source and toolchain provenance
         run: |
           git write-tree
