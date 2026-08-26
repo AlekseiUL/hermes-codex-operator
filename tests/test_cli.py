@@ -50,6 +50,26 @@ class CliTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["codex_version"], "codex-cli synthetic")
 
+    def test_doctor_rejects_python_315_and_newer(self) -> None:
+        output = StringIO()
+        completed = SimpleNamespace(returncode=0, stdout="codex-cli synthetic\n")
+        with patch(
+            "hermes_codex_operator.cli.sys.version_info",
+            (3, 15, 0),
+        ), patch(
+            "hermes_codex_operator.cli.shutil.which",
+            return_value="/synthetic/bin/codex",
+        ), patch(
+            "hermes_codex_operator.cli.subprocess.run",
+            return_value=completed,
+        ):
+            with redirect_stdout(output):
+                code = main(["doctor", "--json"])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 2)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["python_supported"])
+
     def test_submit_and_status_emit_stable_json_without_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
@@ -343,10 +363,10 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(backend.queue_add_calls, 0)
 
-            adapter_commands: list[tuple[str, ...]] = []
+            adapter_socket_paths: list[Path] = []
 
-            def shared_adapter(command, *, experimental_api_version):
-                adapter_commands.append(tuple(command))
+            def shared_adapter(*, experimental_api_version, unix_socket_path):
+                adapter_socket_paths.append(unix_socket_path)
                 self.assertEqual(
                     experimental_api_version,
                     EXPERIMENTAL_QUEUE_API_VERSION,
@@ -354,9 +374,12 @@ class CliTests(unittest.TestCase):
                 return FakeCodexAdapter(backend)
 
             output = StringIO()
+            endpoint = SimpleNamespace(socket_path=Path("/synthetic/app-server.sock"))
             with patch(
-                "hermes_codex_operator.cli.AppServerAdapter",
-                side_effect=shared_adapter,
+                "hermes_codex_operator.cli.discover_managed_app_server",
+                return_value=endpoint,
+            ), patch(
+                "hermes_codex_operator.cli.AppServerAdapter", side_effect=shared_adapter
             ):
                 with redirect_stdout(output):
                     code = main([*base, EXPERIMENTAL_QUEUE_API_VERSION])
@@ -365,8 +388,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(queued["status"], "VERIFIED")
             self.assertEqual(queued["dispatch_kind"], "queue")
             self.assertEqual(
-                adapter_commands,
-                [("codex", "app-server", "proxy")],
+                adapter_socket_paths,
+                [Path("/synthetic/app-server.sock")],
             )
             self.assertEqual(backend.queue_add_calls, 1)
 

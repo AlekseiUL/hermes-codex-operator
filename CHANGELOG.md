@@ -58,9 +58,14 @@ All notable changes to this project will be documented here. The format follows
   one-`queue/add` limit.
 - Match Codex 0.149.0 queued-text normalization (`text_elements: []`) so live
   semantic identity does not fail on a server-added default field.
-- Use one fixed `codex app-server proxy` transport for queue operations and
-  require the caller to opt into an already-running managed App Server with
-  `--shared-app-server`.
+- Connect queue operations directly to the managed Unix socket reported by the
+  read-only `codex app-server daemon version` command, using `websockets` and
+  the version-qualified `/rpc` endpoint.
+- Treat `turn/completed` as a connection-local acceleration only: prove both
+  owner and target terminal state through bounded authoritative `thread/read`
+  polling, and fail closed if an available notification disagrees.
+- Retry only Codex's exact transient empty-session-metadata race during the
+  disposable live owner preflight; no queue mutation is retried.
 - Wait for active-owner terminal state and inspect bounded queue state before
   using `thread/queue/start` when the server has not consumed the item.
 - Correlate an automatically consumed turn by the exact queued client-message ID
@@ -71,6 +76,8 @@ All notable changes to this project will be documented here. The format follows
   turn status and text before queue verification.
 - Repeat the complete authoritative identity, turn, result, workspace, and
   queue-absence check immediately before recording `VERIFIED`.
+- Make `doctor` enforce the declared Python range `>=3.11,<3.15`, including the
+  upper bound.
 
 ## [0.0.1] - 2026-08-25
 

@@ -230,8 +230,8 @@ and `catalog read --include-result` surfaces.
 
 The shared-queue path is a separate experimental mutation, never a fallback
 from `continue`. A standalone CLI process cannot own an active task from some
-other App Server process. Start Codex's managed App Server explicitly, ensure
-the active task is loaded there, and select the fixed proxy transport:
+other App Server process. Start Codex's managed App Server explicitly and ensure
+the active task is loaded there:
 
 ```bash
 codex app-server daemon start
@@ -250,16 +250,20 @@ hermes-codex queue \
 ```
 
 Stable commands initialize App Server with `experimentalApi: false`. The queue
-CLI refuses to run without `--shared-app-server`; that flag uses the fixed
-`codex app-server proxy` argv and never accepts an arbitrary transport command.
+CLI refuses to run without `--shared-app-server`; that flag reads `socketPath`
+and `appServerVersion` from `codex app-server daemon version`, requires exact
+Codex 0.149.0, and connects directly to `/rpc` on that Unix socket with
+`websockets`. It never accepts an arbitrary transport command.
 `queue` opts into `experimentalApi: true`, proves that the exact active thread
 is loaded in that managed server, verifies its exact `0.149.0` runtime evidence,
-stores the message and baseline-turn digests, and enqueues once. A lost
-or malformed enqueue response gets one bounded queue inspection and no retry;
+stores the message and baseline-turn digests, and enqueues once. A lost or
+malformed enqueue response gets one bounded queue inspection and no retry;
 zero, multiple, duplicated, or mismatched candidates become `UNKNOWN`. Queue
 disappearance is not completion: the resulting turn must carry the exact queued
 client-message ID and normalized-input digest, followed by authoritative
-completed exact-turn readback. Active
+completed exact-turn readback. Because completion notifications may be
+connection-local, owner and target completion are proven with bounded exact
+`thread/read` polling; a notification/readback disagreement fails closed. Active
 queues can be consumed automatically by Codex after the owner turn becomes
 terminal; `thread/queue/start` is used only after a bounded readback still shows
 the exact submission queued. Both automatic consumption and the manual fallback

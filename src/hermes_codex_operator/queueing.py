@@ -30,6 +30,7 @@ from .workspace import WorkspaceError, WorkspacePolicy, resolve_workspace, snaps
 MAX_RUNTIME_PAGES = 20
 QUEUE_AUTOCONSUME_POLLS = 5
 QUEUE_AUTOCONSUME_POLL_SECONDS = 0.1
+OWNER_TERMINAL_POLL_SECONDS = 0.1
 
 
 class QueueContinuationOperator(Operator):
@@ -179,33 +180,13 @@ class QueueContinuationOperator(Operator):
                 assert queue_baseline.submission_id is not None
 
                 try:
-                    owner_terminal = await adapter.wait_for_completion(
+                    await self._await_owner_terminal_readback(
+                        adapter,
                         expected_thread,
+                        resolved_workspace,
                         active_turn_id,
                         float(contract.timeout_seconds),
                     )
-                    if owner_terminal not in {"completed", "failed", "interrupted"}:
-                        raise ProtocolIntegrityError(
-                            "active owner turn returned an unknown terminal status"
-                        )
-                    owner_readback = await adapter.read_thread(expected_thread)
-                    self._validate_thread_identity(
-                        owner_readback, expected_thread, resolved_workspace
-                    )
-                    authoritative_owner = tuple(
-                        turn
-                        for turn in owner_readback.turns
-                        if turn.turn_id == active_turn_id
-                    )
-                    if (
-                        len(authoritative_owner) != 1
-                        or authoritative_owner[0].status
-                        not in {"completed", "failed", "interrupted"}
-                        or authoritative_owner[0].status != owner_terminal
-                    ):
-                        raise ProtocolIntegrityError(
-                            "active owner terminal notification and readback disagree"
-                        )
                 except (AdapterError, KeyError, ValueError):
                     return self._terminal_outcome(
                         contract,
@@ -314,34 +295,15 @@ class QueueContinuationOperator(Operator):
                 self.journal.transition(contract.operation_id, OperationState.RUNNING)
 
                 try:
-                    terminal = await adapter.wait_for_completion(
-                        expected_thread, turn_id, float(contract.timeout_seconds)
+                    terminal = await self._await_target_terminal_readback(
+                        adapter,
+                        expected_thread,
+                        resolved_workspace,
+                        baseline_ids,
+                        submission,
+                        turn_id,
+                        float(contract.timeout_seconds),
                     )
-                    correlated = await adapter.read_thread(expected_thread)
-                    self._validate_thread_identity(
-                        correlated, expected_thread, resolved_workspace
-                    )
-                    if (
-                        self._correlated_new_turn(
-                            correlated, baseline_ids, submission
-                        )
-                        != turn_id
-                    ):
-                        raise ProtocolIntegrityError(
-                            "authoritative resulting-turn identity is inconsistent"
-                        )
-                    terminal_turns = tuple(
-                        turn for turn in correlated.turns if turn.turn_id == turn_id
-                    )
-                    if (
-                        len(terminal_turns) != 1
-                        or terminal_turns[0].status
-                        not in {"completed", "failed", "interrupted"}
-                        or terminal_turns[0].status != terminal
-                    ):
-                        raise ProtocolIntegrityError(
-                            "target terminal notification and readback disagree"
-                        )
                     if terminal != "completed":
                         if await self._submission_is_present(
                             adapter, expected_thread, submission
@@ -562,6 +524,69 @@ class QueueContinuationOperator(Operator):
             raise ProtocolIntegrityError("exact queue message identity is ambiguous")
         return bool(id_matches or exact_identity_matches)
 
+    async def _await_owner_terminal_readback(
+        self,
+        adapter: CodexAdapter,
+        thread_id: str,
+        workspace: Path,
+        owner_turn_id: str,
+        timeout: float,
+    ) -> None:
+        """Prove owner completion even when another connection owns notifications."""
+
+        if timeout <= 0:
+            raise ValueError("owner completion timeout must be positive")
+        terminal_statuses = {"completed", "failed", "interrupted"}
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        notification = asyncio.create_task(
+            adapter.wait_for_completion(thread_id, owner_turn_id, timeout)
+        )
+        notified_status: str | None = None
+        try:
+            while True:
+                if notification.done():
+                    if notification.cancelled():
+                        raise asyncio.CancelledError
+                    try:
+                        notified_status = notification.result()
+                    except AdapterError:
+                        notified_status = None
+                remote = await adapter.read_thread(thread_id)
+                self._validate_thread_identity(remote, thread_id, workspace)
+                matching = tuple(
+                    turn for turn in remote.turns if turn.turn_id == owner_turn_id
+                )
+                if len(matching) != 1:
+                    raise ProtocolIntegrityError(
+                        "active owner turn identity is absent or ambiguous"
+                    )
+                authoritative_status = matching[0].status
+                if authoritative_status in terminal_statuses:
+                    if (
+                        notified_status is not None
+                        and notified_status != authoritative_status
+                    ):
+                        raise ProtocolIntegrityError(
+                            "active owner terminal notification and readback disagree"
+                        )
+                    return
+                if authoritative_status != "inProgress":
+                    raise ProtocolIntegrityError(
+                        "active owner turn returned an unknown status"
+                    )
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise AdapterTimeout("thread/read owner completion", timeout)
+                await asyncio.sleep(min(OWNER_TERMINAL_POLL_SECONDS, remaining))
+        finally:
+            if not notification.done():
+                notification.cancel()
+            try:
+                await notification
+            except (asyncio.CancelledError, AdapterError):
+                pass
+
     async def _await_auto_consumed_turn(
         self,
         adapter: CodexAdapter,
@@ -592,6 +617,79 @@ class QueueContinuationOperator(Operator):
             if attempt + 1 < QUEUE_AUTOCONSUME_POLLS:
                 await asyncio.sleep(QUEUE_AUTOCONSUME_POLL_SECONDS)
         return None, submission_present
+
+    async def _await_target_terminal_readback(
+        self,
+        adapter: CodexAdapter,
+        thread_id: str,
+        workspace: Path,
+        baseline_ids: tuple[str, ...],
+        submission: QueuedSubmission,
+        turn_id: str,
+        timeout: float,
+    ) -> str:
+        """Prove exact target completion without requiring broadcast notifications."""
+
+        if timeout <= 0:
+            raise ValueError("target completion timeout must be positive")
+        terminal_statuses = {"completed", "failed", "interrupted"}
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        notification = asyncio.create_task(
+            adapter.wait_for_completion(thread_id, turn_id, timeout)
+        )
+        # Give an immediately available notification one event-loop turn before
+        # authoritative polling; absent broadcasts must not block readback.
+        await asyncio.sleep(0)
+        notified_status: str | None = None
+        try:
+            while True:
+                if notification.done():
+                    if notification.cancelled():
+                        raise asyncio.CancelledError
+                    try:
+                        notified_status = notification.result()
+                    except AdapterError:
+                        notified_status = None
+                correlated = await adapter.read_thread(thread_id)
+                self._validate_thread_identity(correlated, thread_id, workspace)
+                if (
+                    self._correlated_new_turn(correlated, baseline_ids, submission)
+                    != turn_id
+                ):
+                    raise ProtocolIntegrityError(
+                        "authoritative resulting-turn identity is inconsistent"
+                    )
+                matching = tuple(
+                    turn for turn in correlated.turns if turn.turn_id == turn_id
+                )
+                if len(matching) != 1:
+                    raise ProtocolIntegrityError(
+                        "target turn identity is absent or ambiguous"
+                    )
+                authoritative_status = matching[0].status
+                if authoritative_status in terminal_statuses:
+                    if (
+                        notified_status is not None
+                        and notified_status != authoritative_status
+                    ):
+                        raise ProtocolIntegrityError(
+                            "target terminal notification and readback disagree"
+                        )
+                    return authoritative_status
+                if authoritative_status != "inProgress":
+                    raise ProtocolIntegrityError("target turn returned an unknown status")
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise AdapterTimeout("thread/read target completion", timeout)
+                await asyncio.sleep(min(OWNER_TERMINAL_POLL_SECONDS, remaining))
+        finally:
+            if not notification.done():
+                notification.cancel()
+            try:
+                await notification
+            except (asyncio.CancelledError, AdapterError):
+                pass
 
     @classmethod
     def _correlated_new_turn(

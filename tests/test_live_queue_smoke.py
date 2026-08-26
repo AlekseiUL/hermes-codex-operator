@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import redirect_stderr
 import importlib.util
 from io import StringIO
@@ -8,7 +9,10 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
+
+from hermes_codex_operator.adapters.base import RemoteRequestError
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,6 +32,55 @@ def load_script_module():
 
 
 class LiveQueueSmokeSafetyTests(unittest.TestCase):
+    def test_owner_readiness_retries_only_empty_session_race(self) -> None:
+        module = load_script_module()
+
+        class Adapter:
+            calls = 0
+
+            async def read_thread(self, thread_id):
+                self.calls += 1
+                if self.calls < 3:
+                    raise RemoteRequestError(
+                        "thread/read",
+                        code=-1,
+                        message=(
+                            "failed to read thread: failed to read session metadata "
+                            "/synthetic/rollout.jsonl: rollout is empty"
+                        ),
+                    )
+                return SimpleNamespace(thread_id=thread_id)
+
+        adapter = Adapter()
+        result = asyncio.run(
+            module._read_owner_when_ready(
+                adapter, "thread-synthetic", attempts=3, delay_seconds=0
+            )
+        )
+        self.assertEqual(result.thread_id, "thread-synthetic")
+        self.assertEqual(adapter.calls, 3)
+
+    def test_owner_readiness_does_not_retry_other_remote_errors(self) -> None:
+        module = load_script_module()
+
+        class Adapter:
+            calls = 0
+
+            async def read_thread(self, thread_id):
+                self.calls += 1
+                raise RemoteRequestError(
+                    "thread/read", code=-1, message="synthetic permission failure"
+                )
+
+        adapter = Adapter()
+        with self.assertRaises(RemoteRequestError):
+            asyncio.run(
+                module._read_owner_when_ready(
+                    adapter, "thread-synthetic", attempts=3, delay_seconds=0
+                )
+            )
+        self.assertEqual(adapter.calls, 1)
+
     def run_script(self, *args: str) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         source = os.fspath(ROOT / "src")
@@ -67,10 +120,11 @@ class LiveQueueSmokeSafetyTests(unittest.TestCase):
         self.assertIn("terminal command before replying: sleep 30", source)
         self.assertNotIn("python3 -c 'import time; time.sleep", source)
 
-    def test_live_path_uses_managed_proxy_and_the_public_queue_cli(self) -> None:
+    def test_live_path_uses_direct_unix_socket_and_the_public_queue_cli(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
 
-        self.assertIn('PROXY_COMMAND = ("codex", "app-server", "proxy")', source)
+        self.assertIn("discover_managed_app_server", source)
+        self.assertIn("unix_socket_path=socket_path", source)
         self.assertIn('"hermes_codex_operator.cli"', source)
         self.assertIn('"--shared-app-server"', source)
         self.assertIn('"app-server", "daemon", "version"', source)
@@ -85,7 +139,10 @@ class LiveQueueSmokeSafetyTests(unittest.TestCase):
             stderr="synthetic absent daemon",
         )
         with patch.object(module.shutil, "which", return_value="synthetic-codex"):
-            with patch.object(module.subprocess, "run", return_value=completed):
+            with patch(
+                "hermes_codex_operator.adapters.app_server.subprocess.run",
+                return_value=completed,
+            ):
                 with redirect_stderr(stderr):
                     code = module.main(["--confirm-live-codex"])
 

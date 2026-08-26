@@ -15,7 +15,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import tempfile
 from typing import Iterator, Sequence
@@ -23,15 +22,15 @@ from typing import Iterator, Sequence
 from hermes_codex_operator.adapters.app_server import (
     AppServerAdapter,
     EXPERIMENTAL_QUEUE_API_VERSION,
+    discover_managed_app_server,
 )
-from hermes_codex_operator.adapters.base import AdapterError
+from hermes_codex_operator.adapters.base import AdapterError, RemoteRequestError
 from hermes_codex_operator.models import WorkContract
 
 
 EXPECTED_BYTES = b"HCO_QUEUE_LIVE_OK\n"
 TASK_ID = "hermes-codex-operator-queue-live-smoke"
 OPERATION_ID = "hermes-codex-operator-queue-live-smoke-001"
-PROXY_COMMAND = ("codex", "app-server", "proxy")
 OWNER_PROMPT = (
     "Run exactly this terminal command before replying: sleep 30. "
     "Do not create, delete, or modify any file. After the command exits, "
@@ -41,6 +40,34 @@ OWNER_PROMPT = (
 
 class SmokeFailure(RuntimeError):
     pass
+
+
+async def _read_owner_when_ready(
+    adapter: AppServerAdapter,
+    thread_id: str,
+    *,
+    attempts: int = 20,
+    delay_seconds: float = 0.25,
+):
+    """Retry only Codex's transient empty-session race before queue dispatch."""
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return await adapter.read_thread(thread_id)
+        except RemoteRequestError as exc:
+            transient = (
+                exc.method == "thread/read"
+                and "failed to read session metadata " in exc.remote_message
+                and " is empty" in exc.remote_message
+            )
+            if not transient:
+                raise
+            if attempt == attempts:
+                raise SmokeFailure(
+                    "synthetic owner session metadata stayed empty during bounded readiness"
+                ) from exc
+            await asyncio.sleep(delay_seconds)
+    raise AssertionError("bounded readiness loop did not return or raise")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -216,7 +243,9 @@ def _validate_verified_payload(
     return receipt
 
 
-async def _run(root: Path, *, owner_attempts: int) -> dict[str, object]:
+async def _run(
+    root: Path, *, owner_attempts: int, socket_path: Path
+) -> dict[str, object]:
     contract = _contract(root)
     workspace = Path(contract.workspace)
     contract_path = root / "work-contract.json"
@@ -226,9 +255,9 @@ async def _run(root: Path, *, owner_attempts: int) -> dict[str, object]:
     )
     contract_path.chmod(0o600)
     adapter = AppServerAdapter(
-        PROXY_COMMAND,
         experimental_api_version=EXPERIMENTAL_QUEUE_API_VERSION,
         request_timeout=60.0,
+        unix_socket_path=socket_path,
     )
     try:
         thread = None
@@ -236,7 +265,7 @@ async def _run(root: Path, *, owner_attempts: int) -> dict[str, object]:
         for attempt in range(1, owner_attempts + 1):
             candidate = await adapter.start_thread(workspace)
             await adapter.start_turn(candidate.thread_id, OWNER_PROMPT)
-            owner = await adapter.read_thread(candidate.thread_id)
+            owner = await _read_owner_when_ready(adapter, candidate.thread_id)
             owner_statuses = tuple(item.status for item in owner.turns)
             if owner.thread.status == "active" and sum(
                 status == "inProgress" for status in owner_statuses
@@ -282,7 +311,7 @@ async def _run(root: Path, *, owner_attempts: int) -> dict[str, object]:
             "ok": True,
             "status": "VERIFIED",
             "codex_version": EXPERIMENTAL_QUEUE_API_VERSION,
-            "transport": "managed-daemon-proxy",
+            "transport": "managed-daemon-unix-socket",
             "active_turn_created": True,
             "owner_attempts": len(preflight_interruptions) + 1,
             "preflight_interruptions": preflight_interruptions,
@@ -311,29 +340,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("Codex CLI was not found on PATH.", file=sys.stderr)
         return 2
     try:
-        daemon = subprocess.run(
-            [codex, "app-server", "daemon", "version"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=10,
-            check=False,
+        endpoint = discover_managed_app_server(
+            expected_version=EXPERIMENTAL_QUEUE_API_VERSION,
+            command=(codex, "app-server", "daemon", "version"),
+            timeout=10.0,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        print(f"Cannot inspect the managed Codex App Server: {exc}", file=sys.stderr)
-        return 2
-    if daemon.returncode != 0:
+    except AdapterError as exc:
+        detail = str(exc) or type(exc).__name__
         print(
-            "Managed Codex App Server is not running. Start it explicitly with "
-            "`codex app-server daemon start`, then rerun this smoke.",
+            f"Managed Codex App Server is unavailable; daemon start may be required: {detail}",
             file=sys.stderr,
         )
         return 2
-
     try:
         with _smoke_root(keep=args.keep) as root:
-            output = asyncio.run(_run(root, owner_attempts=args.owner_attempts))
+            output = asyncio.run(
+                _run(
+                    root,
+                    owner_attempts=args.owner_attempts,
+                    socket_path=endpoint.socket_path,
+                )
+            )
             if args.keep:
                 output["kept_workspace"] = os.fspath(root)
             print(json.dumps(output, sort_keys=True, separators=(",", ":")))

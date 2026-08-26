@@ -107,8 +107,9 @@ exact version.
 The public CLI additionally requires `--shared-app-server`. The user must
 explicitly start Codex's managed App Server first; the active owner and the
 queue client must use that same server. The flag selects the fixed
-`codex app-server proxy` argv, not an arbitrary command. A fresh App Server
-process cannot satisfy ownership for another session's active task.
+daemon discovered through read-only `codex app-server daemon version`, checks
+its exact version, and connects directly to `/rpc` on the returned Unix socket.
+A fresh App Server process cannot satisfy ownership for another session's active task.
 
 Before enqueue, the operator proves one exact loaded owner plus one active turn,
 binds the thread/workspace, and stores the contract-message hash and complete

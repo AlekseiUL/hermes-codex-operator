@@ -91,8 +91,8 @@ this stable continuation path.
 **What:** Add a separate exact-version opt-in `queue` command with loaded/active
 ownership proof in one managed App Server, immutable queue baseline, one
 enqueue, one bounded recovery inspection, exact submission/turn binding, and
-authoritative completion. The public CLI uses only the fixed managed-daemon
-proxy transport.
+authoritative completion. The public CLI uses only the managed daemon's
+version-qualified direct Unix-socket `/rpc` transport.
 **Files:** `src/hermes_codex_operator/queueing.py`,
 `src/hermes_codex_operator/adapters/app_server.py`,
 `src/hermes_codex_operator/journal.py`, `src/hermes_codex_operator/cli.py`,

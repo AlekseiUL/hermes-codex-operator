@@ -36,11 +36,17 @@ only an explicit exact `--experimental-api-version 0.149.0`, initializes with
 report the exact selected version before any queue side effect.
 Unknown server requests and permission broadening fail closed.
 
-The queue CLI also requires `--shared-app-server`. It connects through the
-fixed `codex app-server proxy` command to an already-running managed App Server;
-the owner task must be loaded in that same server. Without the flag, the CLI
+The queue CLI also requires `--shared-app-server`. It reads the exact Unix
+`socketPath` and `appServerVersion` from `codex app-server daemon version`, then
+connects directly to `/rpc` with `websockets`; the owner task must be loaded in
+that same server. Without the flag, the CLI
 fails before dispatch instead of starting a private App Server that cannot
 prove ownership of another session's active task.
+
+Managed completion notifications aren't assumed to be broadcast to every
+WebSocket client. Queue completion therefore uses bounded authoritative
+`thread/read` polling for the exact owner and target turns. An available
+notification is cross-checked and any disagreement fails closed.
 
 `project/list` is deliberately excluded from the current source. Catalog/read/adopt/watch do
 not call `thread/resume`, `thread/start`, or `turn/start`; they use only

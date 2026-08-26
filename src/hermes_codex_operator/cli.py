@@ -9,7 +9,11 @@ import subprocess
 import sys
 from typing import Sequence
 
-from .adapters.app_server import AppServerAdapter, EXPERIMENTAL_QUEUE_API_VERSION
+from .adapters.app_server import (
+    AppServerAdapter,
+    EXPERIMENTAL_QUEUE_API_VERSION,
+    discover_managed_app_server,
+)
 from .adapters.base import AdapterError, UnsupportedCapability
 from .catalog import CatalogOperator
 from .continuation import ContinuationOperator
@@ -18,9 +22,6 @@ from .journal import CompletionEvent, JournalError, SQLiteJournal, WatchRecord
 from .models import ContractValidationError, WorkContract, sha256_text
 from .queueing import QueueContinuationOperator
 from .workspace import WorkspacePolicy
-
-
-SHARED_APP_SERVER_PROXY_COMMAND = ("codex", "app-server", "proxy")
 
 
 def default_state_path() -> Path:
@@ -88,8 +89,8 @@ def _parser() -> argparse.ArgumentParser:
         "--shared-app-server",
         action="store_true",
         help=(
-            "connect through codex app-server proxy to the already-running "
-            "managed App Server that owns the active thread"
+            "connect directly to the already-running managed App Server Unix "
+            "socket that owns the active thread"
         ),
     )
     queue.add_argument(
@@ -225,6 +226,7 @@ def _event_dict(event: CompletionEvent) -> dict[str, object]:
 
 
 def _doctor() -> dict[str, object]:
+    python_supported = (3, 11) <= sys.version_info[:2] < (3, 15)
     codex = shutil.which("codex")
     version: str | None = None
     if codex is not None:
@@ -243,8 +245,8 @@ def _doctor() -> dict[str, object]:
         except (OSError, subprocess.TimeoutExpired):
             version = None
     return {
-        "ok": codex is not None and version is not None and sys.version_info >= (3, 11),
-        "python_supported": sys.version_info >= (3, 11),
+        "ok": codex is not None and version is not None and python_supported,
+        "python_supported": python_supported,
         "codex_found": codex is not None,
         "codex_version": version,
         "app_server_transport": "stdio",
@@ -387,12 +389,18 @@ def main(
                     version = args.experimental_api_version
                     if version != EXPERIMENTAL_QUEUE_API_VERSION:
                         raise UnsupportedCapability("UNSUPPORTED_CAPABILITY")
-                    factory = adapter_factory or (
-                        lambda: AppServerAdapter(
-                            SHARED_APP_SERVER_PROXY_COMMAND,
-                            experimental_api_version=version,
-                        )
-                    )
+                    if adapter_factory is None:
+                        endpoint = discover_managed_app_server(expected_version=version)
+
+                        def managed_adapter_factory() -> AppServerAdapter:
+                            return AppServerAdapter(
+                                experimental_api_version=version,
+                                unix_socket_path=endpoint.socket_path,
+                            )
+
+                        factory = managed_adapter_factory
+                    else:
+                        factory = adapter_factory
                 else:
                     factory = adapter_factory or (lambda: AppServerAdapter())
                 operator = Operator(journal, factory, policy)

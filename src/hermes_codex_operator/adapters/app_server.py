@@ -7,8 +7,12 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess
 from typing import Any, Mapping, Sequence, cast
+
+from websockets.asyncio.client import ClientConnection, unix_connect
+from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from .base import (
     AdapterClosed,
@@ -50,6 +54,63 @@ _SANDBOX_TYPES = {
 EXPERIMENTAL_QUEUE_API_VERSION = "0.149.0"
 
 
+@dataclass(frozen=True, slots=True)
+class ManagedAppServerEndpoint:
+    socket_path: Path
+    app_server_version: str
+
+
+def discover_managed_app_server(
+    *,
+    expected_version: str,
+    command: Sequence[str] = ("codex", "app-server", "daemon", "version"),
+    timeout: float = 5.0,
+) -> ManagedAppServerEndpoint:
+    """Read the official daemon endpoint JSON without starting or stopping it."""
+
+    argv = validate_command(command)
+    try:
+        completed = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AppServerProcessError("could not inspect managed Codex App Server") from exc
+    if completed.returncode != 0:
+        raise AppServerProcessError("managed Codex App Server is unavailable")
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ProtocolIntegrityError("daemon version output is not valid JSON") from exc
+    if not isinstance(payload, Mapping):
+        raise ProtocolIntegrityError("daemon version output must be an object")
+    raw_path = payload.get("socketPath")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise ProtocolIntegrityError("daemon version output omitted socketPath")
+    socket_path = Path(raw_path)
+    if not socket_path.is_absolute():
+        raise ProtocolIntegrityError("daemon socketPath must be absolute")
+    try:
+        mode = socket_path.stat().st_mode
+    except OSError as exc:
+        raise AppServerProcessError("App Server Unix socket is unavailable") from exc
+    if not stat.S_ISSOCK(mode):
+        raise AppServerProcessError("App Server Unix socket path is not a socket")
+    app_server_version = payload.get("appServerVersion")
+    if not isinstance(app_server_version, str) or not app_server_version:
+        raise ProtocolIntegrityError("daemon version output omitted appServerVersion")
+    if app_server_version != expected_version:
+        from .base import UnsupportedCapability
+
+        raise UnsupportedCapability("UNSUPPORTED_CAPABILITY")
+    return ManagedAppServerEndpoint(socket_path, app_server_version)
+
+
 class QueueIdentityConflict(ProtocolIntegrityError):
     """A successful queue response contradicted the requested identity."""
 
@@ -64,9 +125,10 @@ class _PendingRequest:
 
 
 class AppServerAdapter:
-    """Minimal JSONL client for the official Codex App Server stdio surface.
+    """Minimal client for the official Codex App Server transport surfaces.
 
-    The wire format is JSONL, not JSON-RPC 2.0: messages intentionally omit a
+    Stdio uses JSONL. The managed transport connects directly to Codex's Unix
+    socket with the ``websockets`` library. Messages intentionally omit a
     ``jsonrpc`` member. Streamed notifications are observed only for lifecycle
     coordination; ``thread/read`` is always the source of returned model text.
     """
@@ -82,6 +144,7 @@ class AppServerAdapter:
         client_name: str = "hermes-codex-operator",
         client_version: str = "0.1.0",
         experimental_api_version: str | None = None,
+        unix_socket_path: Path | None = None,
     ) -> None:
         self._command = validate_command(command)
         if request_timeout <= 0 or shutdown_timeout <= 0:
@@ -102,9 +165,11 @@ class AppServerAdapter:
         self._client_name = client_name
         self._client_version = client_version
         self._experimental_api_version = experimental_api_version
+        self._unix_socket_path = Path(unix_socket_path) if unix_socket_path is not None else None
 
         self._process: asyncio.subprocess.Process | None = None
         self._process_group_id: int | None = None
+        self._websocket: ClientConnection | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._pending: dict[int, _PendingRequest] = {}
@@ -153,36 +218,16 @@ class AppServerAdapter:
             if self._started:
                 self._raise_if_fatal()
                 return
-            spawn_options: dict[str, Any] = {}
-            if os.name == "posix":
-                spawn_options["start_new_session"] = True
-            elif os.name == "nt":
-                spawn_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-
+            if self._unix_socket_path is not None:
+                await self._connect_unix_socket()
+            else:
+                await self._spawn_stdio_server()
             try:
-                process = await asyncio.create_subprocess_exec(
-                    *self._command,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    limit=self._stdout_line_limit,
-                    **spawn_options,
+                # The reader must exist before initialize: the server may emit a
+                # notification before its initialize response.
+                self._reader_task = asyncio.create_task(
+                    self._reader_loop(), name="codex-app-server-reader"
                 )
-            except (OSError, ValueError) as exc:
-                raise AppServerProcessError("could not start Codex App Server") from exc
-
-            self._process = process
-            if os.name == "posix":
-                self._process_group_id = process.pid
-            # The reader must exist before initialize: the server may emit a
-            # notification before its initialize response.
-            self._reader_task = asyncio.create_task(
-                self._reader_loop(), name="codex-app-server-stdout"
-            )
-            self._stderr_task = asyncio.create_task(
-                self._stderr_loop(), name="codex-app-server-stderr"
-            )
-            try:
                 initialize_result = await self._request(
                     "initialize",
                     {
@@ -203,6 +248,54 @@ class AppServerAdapter:
                 await self.close()
                 raise
             self._started = True
+
+    async def _connect_unix_socket(self) -> None:
+        path = self._unix_socket_path
+        assert path is not None
+        if os.name != "posix" or not path.is_absolute():
+            raise AppServerProcessError("App Server Unix socket path is unsupported")
+        try:
+            mode = path.stat().st_mode
+        except OSError as exc:
+            raise AppServerProcessError("App Server Unix socket is unavailable") from exc
+        if not stat.S_ISSOCK(mode):
+            raise AppServerProcessError("App Server Unix socket path is not a socket")
+        try:
+            self._websocket = await unix_connect(
+                path=os.fspath(path),
+                uri="ws://localhost/rpc",
+                open_timeout=self._request_timeout,
+                close_timeout=self._shutdown_timeout,
+                max_size=self._stdout_line_limit,
+                compression=None,
+                ping_interval=None,
+            )
+        except (OSError, WebSocketException, asyncio.TimeoutError) as exc:
+            raise AppServerProcessError("could not connect to Codex App Server socket") from exc
+
+    async def _spawn_stdio_server(self) -> None:
+        spawn_options: dict[str, Any] = {}
+        if os.name == "posix":
+            spawn_options["start_new_session"] = True
+        elif os.name == "nt":
+            spawn_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *self._command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=self._stdout_line_limit,
+                **spawn_options,
+            )
+        except (OSError, ValueError) as exc:
+            raise AppServerProcessError("could not start Codex App Server") from exc
+        self._process = process
+        if os.name == "posix":
+            self._process_group_id = process.pid
+        self._stderr_task = asyncio.create_task(
+            self._stderr_loop(), name="codex-app-server-stderr"
+        )
 
     async def start_thread(
         self,
@@ -683,51 +776,62 @@ class AppServerAdapter:
         *,
         pending: _PendingRequest | None = None,
     ) -> None:
-        process = self._process
-        if process is None or process.stdin is None or process.returncode is not None:
-            raise AppServerProcessError(
-                "Codex App Server stdin is unavailable",
-                returncode=None if process is None else process.returncode,
-            )
         try:
-            encoded = (
-                json.dumps(
-                    dict(message),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                + b"\n"
+            encoded = json.dumps(
+                dict(message),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
             )
         except (TypeError, ValueError) as exc:
             raise ProtocolIntegrityError("outgoing message is not valid JSON") from exc
+        if len(encoded.encode("utf-8")) > self._stdout_line_limit:
+            raise ProtocolIntegrityError("outgoing App Server message is too large")
 
         async with self._write_lock:
-            process.stdin.write(encoded)
+            websocket = self._websocket
+            if websocket is not None:
+                if pending is not None:
+                    pending.sent = True
+                await websocket.send(encoded)
+                return
+            process = self._process
+            if process is None or process.stdin is None or process.returncode is not None:
+                raise AppServerProcessError(
+                    "Codex App Server stdin is unavailable",
+                    returncode=None if process is None else process.returncode,
+                )
+            process.stdin.write(encoded.encode("utf-8") + b"\n")
             if pending is not None:
                 pending.sent = True
             await process.stdin.drain()
 
     async def _reader_loop(self) -> None:
         process = self._process
-        if process is None or process.stdout is None:
+        websocket = self._websocket
+        if websocket is None and (process is None or process.stdout is None):
             return
         try:
             while True:
-                line = await process.stdout.readline()
-                if not line:
+                if websocket is not None:
+                    payload = await websocket.recv()
+                else:
+                    assert process is not None and process.stdout is not None
+                    line = await process.stdout.readline()
+                    payload = line if line else None
+                if payload is None:
                     if not self._closing:
                         error = AppServerProcessError(
                             "Codex App Server closed stdout",
-                            returncode=process.returncode,
+                            returncode=None if process is None else process.returncode,
                         )
                         self._set_fatal(error)
                         asyncio.create_task(self._terminate_process_group())
                     return
                 try:
-                    message = json.loads(line)
+                    message = json.loads(payload)
                 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                    raise ProtocolIntegrityError("App Server emitted invalid JSONL") from exc
+                    raise ProtocolIntegrityError("App Server emitted invalid JSON") from exc
                 if not isinstance(message, dict):
                     raise ProtocolIntegrityError("App Server message must be an object")
                 await self._handle_message(message)
@@ -737,12 +841,18 @@ class AppServerAdapter:
             self._set_fatal(exc)
             if not self._closing:
                 asyncio.create_task(self._terminate_process_group())
+        except ConnectionClosed as exc:
+            if not self._closing:
+                error = AppServerProcessError("Codex App Server closed the WebSocket")
+                error.__cause__ = exc
+                self._set_fatal(error)
         except (ValueError, OSError) as exc:
-            error = ProtocolIntegrityError("failed while reading App Server JSONL")
+            error = ProtocolIntegrityError("failed while reading App Server transport")
             error.__cause__ = exc
             self._set_fatal(error)
             if not self._closing:
                 asyncio.create_task(self._terminate_process_group())
+
 
     async def _stderr_loop(self) -> None:
         process = self._process
@@ -880,6 +990,16 @@ class AppServerAdapter:
 
     async def _terminate_process_group(self) -> None:
         async with self._terminate_lock:
+            websocket = self._websocket
+            if websocket is not None:
+                self._websocket = None
+                try:
+                    await asyncio.wait_for(
+                        websocket.close(), timeout=self._shutdown_timeout
+                    )
+                except (asyncio.TimeoutError, WebSocketException):
+                    pass
+                return
             process = self._process
             if process is None:
                 return
