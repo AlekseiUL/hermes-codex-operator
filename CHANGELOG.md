@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.0 — unreleased
+
+- Include current main fixes and reviewed CI/dependency hardening.
+- Preserve offline-only verification and explicit runtime approval boundaries.
+
+
 All notable changes to this project will be documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
