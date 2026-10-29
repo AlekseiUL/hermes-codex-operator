@@ -218,6 +218,20 @@ def _allowed_email(local: str, domain: str) -> bool:
     }
 
 
+def _public_automation_metadata_line(line: str, path: str) -> bool:
+    """Recognize only exact public service identities in raw commit metadata.
+
+    These are not personal addresses. This is not an identity/authenticity check:
+    Git author text is caller-controlled. Source files, archives, tag metadata,
+    other addresses, and the private denylist keep their existing checks.
+    """
+    if not re.fullmatch(r"history/commits/[0-9a-f]{12}\.metadata", path):
+        return False
+    committer = "committer GitHub <" + "noreply" + "@github.com> "
+    signoff = "Signed-off-by: dependabot[bot] <" + "support" + "@github.com>"
+    return bool(re.fullmatch(re.escape(committer) + r"[0-9]+ [+-][0-9]{4}", line)) or line == signoff
+
+
 def _scan_text(
     text: str,
     path: str,
@@ -231,7 +245,7 @@ def _scan_text(
                 findings.append(_finding("HOME_PATH", path, line_number, match.group(0)))
 
         for match in _EMAIL_RE.finditer(line):
-            if not _allowed_email(match.group(1), match.group(2)):
+            if not _allowed_email(match.group(1), match.group(2)) and not _public_automation_metadata_line(line, path):
                 findings.append(_finding("EMAIL", path, line_number, match.group(0)))
 
         for pattern in _PHONE_PATTERNS:
