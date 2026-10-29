@@ -326,6 +326,44 @@ class GitScanTests(unittest.TestCase):
             self.assertIn("PRIVATE_DENYLIST", {item.rule_id for item in report.findings})
 
 
+class PublicAutomationMetadataTests(unittest.TestCase):
+    def scan(self, line: str, path: str = "history/commits/012345abcdef.metadata", deny=()):
+        findings = []
+        privacy_gate._scan_text(line, path, deny, findings)
+        return findings
+
+    def test_exact_public_automation_metadata_is_not_personal_email(self):
+        lines = [
+            "committer GitHub <" + "noreply" + "@github.com> 1700000000 +0000",
+            "Signed-off-by: dependabot[bot] <" + "support" + "@github.com>",
+        ]
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertEqual(self.scan(line), [])
+
+    def test_public_service_addresses_still_fail_in_source_and_archives(self):
+        line = "Signed-off-by: dependabot[bot] <" + "support" + "@github.com>"
+        for path in ("README.md", "history/blobs/README.md", "release/README.md", "history/tags/012345abcdef.metadata"):
+            with self.subTest(path=path):
+                self.assertIn("EMAIL", {f.rule_id for f in self.scan(line, path)})
+
+    def test_personal_and_lookalike_metadata_remain_blocked(self):
+        lines = [
+            "committer GitHub <" + "person" + "@private.test> 1700000000 +0000",
+            "committer Other <" + "noreply" + "@github.com> 1700000000 +0000",
+            "Signed-off-by: other <" + "support" + "@github.com>",
+            "Signed-off-by: dependabot[bot] <" + "support" + "@github.com.attacker.test>",
+            "prefix Signed-off-by: dependabot[bot] <" + "support" + "@github.com>",
+        ]
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertIn("EMAIL", {f.rule_id for f in self.scan(line)})
+
+    def test_public_automation_exception_does_not_skip_private_denylist(self):
+        line = "Signed-off-by: dependabot[bot] <" + "support" + "@github.com>"
+        self.assertIn("PRIVATE_DENYLIST", {f.rule_id for f in self.scan(line, deny=("dependabot",))})
+
+
 class ReleaseArchiveTests(unittest.TestCase):
     def test_clean_tar_archive_passes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
