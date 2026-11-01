@@ -9,6 +9,8 @@ import threading
 from typing import Awaitable, Callable, cast
 
 from .adapters.base import (
+    DEFAULT_SANDBOX,
+    SANDBOX_MODES,
     AdapterError,
     AdapterTimeout,
     CodexAdapter,
@@ -18,6 +20,7 @@ from .adapters.base import (
     ReasoningEffort,
     RemoteRequestError,
     RemoteTurnFailed,
+    SandboxMode,
     ThreadOptions,
     TurnInProgress,
     TurnOptions,
@@ -73,10 +76,16 @@ class Operator:
         journal: SQLiteJournal,
         adapter_factory: AdapterFactory,
         workspace_policy: WorkspacePolicy,
+        *,
+        sandbox: SandboxMode = DEFAULT_SANDBOX,
     ) -> None:
+        if sandbox not in SANDBOX_MODES:
+            raise ValueError(f"unsupported Codex sandbox mode: {sandbox!r}")
         self.journal = journal
         self.adapter_factory = adapter_factory
         self.workspace_policy = workspace_policy
+        # Caller-level setting, never read from a WorkContract.
+        self.sandbox = sandbox
 
     def status(self, operation_id: str) -> OperationRecord:
         return self.journal.get_operation(operation_id)
@@ -832,10 +841,9 @@ class Operator:
             )
         return tuple(evidence)
 
-    @staticmethod
-    def _thread_options(contract: WorkContract) -> ThreadOptions:
+    def _thread_options(self, contract: WorkContract) -> ThreadOptions:
         return ThreadOptions(
-            sandbox="workspace-write",
+            sandbox=self.sandbox,
             approval_policy="never",
             model=contract.model,
         )

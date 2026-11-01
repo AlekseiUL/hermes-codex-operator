@@ -28,6 +28,15 @@ Verification argv is trusted caller input and runs outside the Codex sandbox as
 the operator's OS user. `shell=false` avoids shell interpretation but does not
 confine the executable or prevent writes outside the workspace.
 
+The Codex sandbox defaults to `workspace-write`. Only the person running the
+operator can broaden it, through `--sandbox` or `HERMES_CODEX_SANDBOX`; the
+same applies to allowing workspace symlinks (`--allow-symlinks` or
+`HERMES_CODEX_ALLOW_SYMLINKS`), which are then recorded as evidence but never
+followed. With `danger-full-access`, Codex can reach the network and write
+anywhere the operator's OS user can, and the changed-path check still covers
+only the workspace. These switches are trusted-caller configuration, not an
+authorization boundary against a process that already runs as that OS user.
+
 The following are never implied by a WorkContract:
 
 - permission to publish, deploy, push, or open a pull request;

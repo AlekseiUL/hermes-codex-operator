@@ -24,6 +24,8 @@
 9. A queued operation is later resumed through a different dispatch path.
 10. Remote queue or turn state changes after verification but before success is
     recorded.
+11. A contract author, or the agent writing the contract, grants itself broader
+    Codex access.
 
 ## Controls
 
@@ -35,10 +37,15 @@
   immediately before `VERIFIED`;
 - immutable terminal state and receipt are inserted in one transaction;
 - canonical allowlisted workspace roots;
-- no followed symlinks in MVP;
+- no followed symlinks; symlinks are rejected unless the operator opts in
+  (`--allow-symlinks`), in which case each link is recorded by its target text
+  and link changes are subject to the changed-path scope; a symlinked
+  workspace root stays rejected;
 - before/after manifests and explicit changed-path policy;
 - argv-only verification with time and output bounds;
-- safe Codex sandbox defaults and no automatic escalation;
+- safe Codex sandbox defaults and no automatic escalation; broader access
+  (`--sandbox`, `HERMES_CODEX_SANDBOX`) is operator configuration only, and the
+  WorkContract schema has no field that could select it;
 - prompt/result content omitted from default receipts;
 - runtime files live outside Git and are permission-restricted;
 - synthetic tests and examples;
