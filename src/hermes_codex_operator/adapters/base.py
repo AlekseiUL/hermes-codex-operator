@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, Literal, Mapping, Protocol, Sequence, get_args, runtime_checkable
 
 
 JSONValue = (
@@ -15,6 +15,8 @@ JSONValue = (
     | dict[str, "JSONValue"]
 )
 SandboxMode = Literal["read-only", "workspace-write", "danger-full-access"]
+SANDBOX_MODES: tuple[SandboxMode, ...] = get_args(SandboxMode)
+DEFAULT_SANDBOX: SandboxMode = "workspace-write"
 ApprovalPolicy = Literal["untrusted", "on-failure", "on-request", "never"]
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 TurnTerminalStatus = Literal["completed", "failed", "interrupted"]
@@ -114,9 +116,10 @@ class ReadbackMissingResult(AdapterError):
 
 @dataclass(frozen=True, slots=True)
 class ThreadOptions:
-    sandbox: SandboxMode = "workspace-write"
+    sandbox: SandboxMode = DEFAULT_SANDBOX
     # With no interactive approval bridge in v0, ``never`` is fail-closed:
-    # Codex stays in workspace-write and cannot pause on an unhandled prompt.
+    # Codex stays within the selected sandbox and cannot pause on an unhandled
+    # prompt. The approval policy does not itself confine filesystem access.
     approval_policy: ApprovalPolicy = "never"
     model: str | None = None
     developer_instructions: str | None = None

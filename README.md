@@ -375,6 +375,60 @@ sandbox; `shell=false`, time/output bounds, and post-hoc workspace scope checks
 do not prevent that command from writing elsewhere. Use only reviewable,
 project-local checks you would run yourself.
 
+## Broader Codex access (opt-in)
+
+The defaults stay safe: Codex threads run with `workspace-write`, and any
+symlink inside the workspace fails the run before dispatch. Whoever runs the
+operator can broaden this explicitly. A WorkContract cannot: it has no
+sandbox field, and a contract that tries to set one is rejected.
+
+| Setting | CLI option | Environment switch | Default |
+|---|---|---|---|
+| Codex sandbox for started or resumed threads | `--sandbox read-only\|workspace-write\|danger-full-access` | `HERMES_CODEX_SANDBOX` | `workspace-write` |
+| Allow symlinks inside the workspace (recorded, never followed) | `--allow-symlinks` | `HERMES_CODEX_ALLOW_SYMLINKS=1` | off |
+
+The CLI option wins over the environment. An invalid value fails with
+`invalid_configuration` before anything is dispatched. Both options are global,
+so they come before the command; `doctor` reports the effective values:
+
+```bash
+export HERMES_CODEX_SANDBOX=danger-full-access
+hermes-codex doctor --json
+hermes-codex --allow-symlinks submit \
+  --contract work-contract.json \
+  --allow-root /absolute/path/to/projects \
+  --json
+```
+
+What changes with `danger-full-access`: Codex may use the network and write
+anywhere the operator's OS user can. The changed-path check still covers only
+the workspace, so `VERIFIED` says nothing about writes elsewhere. Approval
+stays `never`, so Codex still cannot pause on a prompt.
+
+What changes with `--allow-symlinks`: a symlink inside the workspace is
+recorded by its own target text and never followed. Its evidence is a
+domain-separated digest of the target with size and mode `0`; the snapshot and
+receipt schemas are unchanged. Creating, removing, or
+retargeting a link is a changed path and must match `allowed_change_globs`.
+A write *through* a link to a file outside the workspace is not visible, as
+for any write outside the workspace. The workspace path itself must still not
+be a symlink.
+
+Both settings apply per invocation. A follow-up or recovery that resumes a
+thread uses the setting active for that invocation, not the one from the
+first run; nothing is restored from the journal. Switching symlink handling
+between the runs of one operation can make its recovery fail closed.
+
+`queue` never starts or resumes a thread, so it cannot apply a sandbox: the
+active owner thread keeps its own settings. It therefore rejects `--sandbox`
+and a nonempty `HERMES_CODEX_SANDBOX` with `invalid_configuration` instead of
+accepting a setting it would ignore. An empty environment variable counts as
+unset; an empty `--sandbox` value is invalid.
+
+These switches are configuration for a trusted caller, not an authorization
+boundary: anything that can run commands as the operator's OS user can also
+set them.
+
 ## Privacy by construction
 
 - no telemetry;
@@ -536,6 +590,16 @@ hermes skills list
 
 После установки начните новую сессию Hermes и говорите с агентом обычным
 языком или вызовите `/hermes-codex-operator`.
+
+### Расширенный доступ Codex (по явному выбору)
+
+По умолчанию Codex работает в `workspace-write`, а симлинки в рабочей папке
+останавливают запуск. Тот, кто запускает Operator, может явно расширить доступ:
+`--sandbox danger-full-access` или `HERMES_CODEX_SANDBOX=danger-full-access`,
+а также `--allow-symlinks` или `HERMES_CODEX_ALLOW_SYMLINKS=1`. Контракт этого
+сделать не может. С `danger-full-access` проверка изменённых файлов по-прежнему
+видит только рабочую папку. Подробности — в разделе
+[Broader Codex access (opt-in)](#broader-codex-access-opt-in).
 
 ### Модель надёжности
 

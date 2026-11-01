@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from functools import lru_cache
 import hashlib
@@ -49,6 +49,11 @@ class WorkspacePolicy:
             ".mypy_cache",
         }
     )
+    # Opt-in, keyword-only so existing positional calls keep their meaning:
+    # record symlinks inside the workspace as evidence (link target, never
+    # followed) instead of rejecting them. The workspace root itself must still
+    # not be a symlink while ``reject_symlinks`` is true.
+    record_symlinks: bool = field(default=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if not self.allowed_roots:
@@ -174,10 +179,31 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _symlink_evidence(path: Path) -> FileEvidence:
+    """Identify a symlink by its own target text, without following it.
+
+    The digest is domain-separated from file contents, and the size is zero, so
+    a link never equals a regular file. Creating, removing, or retargeting a
+    link therefore appears as a changed path and is subject to scope checks.
+    """
+
+    target = os.fsencode(os.readlink(path))
+    return FileEvidence(
+        sha256=hashlib.sha256(b"hermes-codex-operator:symlink\0" + target).hexdigest(),
+        size=0,
+        mode=0,
+    )
+
+
 def snapshot_workspace(workspace: Path | str, policy: WorkspacePolicy) -> WorkspaceSnapshot:
     root = resolve_workspace(workspace, policy)
     evidence: dict[str, FileEvidence] = {}
     total_bytes = 0
+
+    def record_symlink(path: Path, relative: str) -> None:
+        if len(evidence) + 1 > policy.max_files:
+            raise SnapshotLimitExceeded("workspace file-count limit exceeded")
+        evidence[relative] = _symlink_evidence(path)
 
     for current, dirnames, filenames in os.walk(root, followlinks=False):
         current_path = Path(current)
@@ -187,8 +213,10 @@ def snapshot_workspace(workspace: Path | str, policy: WorkspacePolicy) -> Worksp
             if name in policy.excluded_names:
                 continue
             if candidate.is_symlink():
-                if policy.reject_symlinks:
-                    relative = candidate.relative_to(root).as_posix()
+                relative = candidate.relative_to(root).as_posix()
+                if policy.record_symlinks:
+                    record_symlink(candidate, relative)
+                elif policy.reject_symlinks:
                     raise UnsafeWorkspaceEntry(f"symlink is not allowed: {relative}")
                 continue
             kept_dirs.append(name)
@@ -200,7 +228,9 @@ def snapshot_workspace(workspace: Path | str, policy: WorkspacePolicy) -> Worksp
             path = current_path / name
             relative = path.relative_to(root).as_posix()
             if path.is_symlink():
-                if policy.reject_symlinks:
+                if policy.record_symlinks:
+                    record_symlink(path, relative)
+                elif policy.reject_symlinks:
                     raise UnsafeWorkspaceEntry(f"symlink is not allowed: {relative}")
                 continue
             metadata = path.lstat()

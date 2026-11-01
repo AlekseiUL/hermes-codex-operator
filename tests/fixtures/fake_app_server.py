@@ -132,6 +132,7 @@ def thread_response(
     *,
     approval_policy: str = "never",
     sandbox_type: str = "workspaceWrite",
+    network_access: bool = False,
 ) -> dict[str, Any]:
     return {
         "approvalPolicy": approval_policy,
@@ -142,7 +143,7 @@ def thread_response(
         "permissionProfile": None,
         "sandbox": {
             "type": sandbox_type,
-            "networkAccess": False,
+            "networkAccess": network_access,
             "writableRoots": [],
         },
         "thread": thread_record(workspace, turns),
@@ -279,13 +280,17 @@ def main() -> None:
 
     expected_thread_method = (
         "thread/resume"
-        if SCENARIO in {"resume", "resume_read_only", "resume_timeout"}
+        if SCENARIO in {"resume", "resume_read_only", "resume_full_access", "resume_timeout"}
         else "thread/start"
     )
     thread_request = expect(expected_thread_method)
     thread_params = thread_request["params"]
     assert os.path.isabs(thread_params["cwd"])
-    expected_sandbox = "read-only" if SCENARIO == "resume_read_only" else "workspace-write"
+    expected_sandbox = {
+        "resume_read_only": "read-only",
+        "full_access": "danger-full-access",
+        "resume_full_access": "danger-full-access",
+    }.get(SCENARIO, "workspace-write")
     expected_approval = "untrusted" if SCENARIO == "resume_read_only" else "never"
     assert thread_params["sandbox"] == expected_sandbox
     assert thread_params["approvalPolicy"] == expected_approval
@@ -298,6 +303,7 @@ def main() -> None:
     sandbox_type = {
         "read-only": "readOnly",
         "workspace-write": "workspaceWrite",
+        "danger-full-access": "dangerFullAccess",
     }[expected_sandbox]
     if SCENARIO == "policy_broadened":
         sandbox_type = "dangerFullAccess"
@@ -308,6 +314,7 @@ def main() -> None:
             [],
             approval_policy=expected_approval,
             sandbox_type=sandbox_type,
+            network_access=expected_sandbox == "danger-full-access",
         ),
     )
 

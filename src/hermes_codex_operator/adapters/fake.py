@@ -47,6 +47,7 @@ class FakeBackend:
     read_turn_calls: int = 0
     read_thread_calls: int = 0
     last_workspace: Path | None = None
+    last_thread_options: ThreadOptions | None = None
     list_thread_calls: int = 0
     list_pages: dict[str | None, ThreadPage] = field(default_factory=dict)
     thread_statuses: dict[str, str] = field(default_factory=dict)
@@ -204,6 +205,7 @@ class FakeCodexAdapter:
         self._ensure_open()
         self.backend.start_thread_calls += 1
         self.backend.last_workspace = workspace
+        self.backend.last_thread_options = options
         if self.backend.fail_at == "start_thread_delivery_unknown":
             raise DeliveryUnknown("thread/start", 1, timeout_seconds=0.01)
         self.backend.threads[self.backend.thread_id] = workspace
@@ -217,6 +219,7 @@ class FakeCodexAdapter:
     ) -> ThreadHandle:
         self._ensure_open()
         self.backend.resume_thread_calls += 1
+        self.backend.last_thread_options = options
         known = self.backend.threads.get(thread_id)
         if known is not None and known != workspace:
             raise RuntimeError("fake thread workspace mismatch")

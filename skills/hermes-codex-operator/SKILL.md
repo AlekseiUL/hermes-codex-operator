@@ -66,6 +66,21 @@ that it closes local state but does not prove already-dispatched remote work
 stopped. It may close any stuck queue operation or a continuation before exact
 turn correlation. A correlated continuation timeout must use `recover`.
 
+## Access settings belong to the user
+
+The Codex sandbox and symlink tolerance are operator configuration, never
+contract fields: `--sandbox` / `HERMES_CODEX_SANDBOX` (default
+`workspace-write`) and `--allow-symlinks` / `HERMES_CODEX_ALLOW_SYMLINKS=1`.
+Run `hermes-codex doctor --json` to see the effective values.
+
+- Never add `sandbox` or similar fields to a WorkContract; it is rejected.
+- Never patch or reinstall the operator to get around a policy failure.
+- If a task needs network or writes outside the workspace, or fails with
+  `workspace_policy_failed` because of a symlink, explain why and let the user
+  decide whether to enable the switch.
+- When `danger-full-access` is active, say so in the result: the changed-path
+  check covers only the workspace.
+
 ## Return the result
 
 Report one compact message through the user's current Hermes channel:

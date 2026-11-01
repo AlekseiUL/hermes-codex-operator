@@ -142,6 +142,14 @@ receipt `changed_paths` cover the combined owner-plus-queued interval. Select
 idle `continue` instead when the user needs proof that each changed path came
 from only the requested follow-up turn.
 
+The sandbox for started or resumed threads is caller configuration
+(`--sandbox`, `HERMES_CODEX_SANDBOX`; default `workspace-write`), resolved per
+invocation, and never part of the WorkContract. `queue` rejects any sandbox
+setting because the active owner thread keeps its own. Workspace symlinks fail
+the run unless the caller enables `--allow-symlinks` /
+`HERMES_CODEX_ALLOW_SYMLINKS=1`; then each link is recorded by its target,
+never followed, and link changes must match `allowed_change_globs`.
+
 An unsupported server approval request fails closed instead of silently
 broadening permissions. A future interactive approval adapter requires a new
 protocol version rather than an unused v1 state.

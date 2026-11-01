@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 
 from .adapters.base import (
+    DEFAULT_SANDBOX,
     AdapterError,
     AdapterTimeout,
     CodexAdapter,
@@ -14,6 +15,7 @@ from .adapters.base import (
     ReadbackMissingResult,
     ReasoningEffort,
     RemoteTurnFailed,
+    SandboxMode,
     TurnOptions,
 )
 from .engine import AdapterFactory, Operator, OperatorOutcome
@@ -37,8 +39,10 @@ class ContinuationOperator(Operator):
         journal: SQLiteJournal,
         adapter_factory: AdapterFactory,
         workspace_policy: WorkspacePolicy,
+        *,
+        sandbox: SandboxMode = DEFAULT_SANDBOX,
     ) -> None:
-        super().__init__(journal, adapter_factory, workspace_policy)
+        super().__init__(journal, adapter_factory, workspace_policy, sandbox=sandbox)
 
     async def continue_idle(
         self, contract: WorkContract, *, thread_id: str

@@ -663,6 +663,20 @@ class AppServerProtocolTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await adapter.close()
 
+    async def test_explicit_full_access_reaches_start_and_resume(self) -> None:
+        options = ThreadOptions(sandbox="danger-full-access", approval_policy="never")
+        for scenario, resume in (("full_access", False), ("resume_full_access", True)):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as name:
+                adapter = self.adapter(scenario)
+                try:
+                    if resume:
+                        handle = await adapter.resume_thread(THREAD_ID, Path(name), options)
+                    else:
+                        handle = await adapter.start_thread(Path(name), options)
+                    self.assertEqual(handle.thread_id, THREAD_ID)
+                finally:
+                    await adapter.close()
+
     async def test_effective_permission_broadening_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as workspace_name:
             adapter = self.adapter("policy_broadened")

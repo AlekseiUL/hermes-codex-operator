@@ -3,18 +3,25 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 from .adapters.app_server import (
     AppServerAdapter,
     EXPERIMENTAL_QUEUE_API_VERSION,
     discover_managed_app_server,
 )
-from .adapters.base import AdapterError, UnsupportedCapability
+from .adapters.base import (
+    DEFAULT_SANDBOX,
+    SANDBOX_MODES,
+    AdapterError,
+    SandboxMode,
+    UnsupportedCapability,
+)
 from .catalog import CatalogOperator
 from .continuation import ContinuationOperator
 from .engine import AdapterFactory, Operator, OperatorOutcome
@@ -24,8 +31,52 @@ from .queueing import QueueContinuationOperator
 from .workspace import WorkspacePolicy
 
 
+SANDBOX_ENV = "HERMES_CODEX_SANDBOX"
+ALLOW_SYMLINKS_ENV = "HERMES_CODEX_ALLOW_SYMLINKS"
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"", "0", "false", "no", "off"})
+
+
+class ConfigurationError(ValueError):
+    """Invalid operator-level configuration from flags or environment."""
+
+
+class AccessSettings(NamedTuple):
+    sandbox: SandboxMode
+    sandbox_explicit: bool
+    allow_symlinks: bool
+
+
 def default_state_path() -> Path:
     return Path.home() / ".local" / "state" / "hermes-codex-operator" / "state.sqlite3"
+
+
+def _access_settings(args: argparse.Namespace) -> AccessSettings:
+    """Resolve caller-level access settings: flag, then environment, then default.
+
+    These settings belong to whoever runs the operator. A WorkContract cannot
+    select or broaden them.
+    """
+    # An explicit flag is always validated, even when empty. An empty or unset
+    # environment variable means "not configured".
+    if args.sandbox is not None:
+        requested: str | None = args.sandbox
+        source = "--sandbox"
+    else:
+        requested = os.environ.get(SANDBOX_ENV) or None
+        source = SANDBOX_ENV
+    sandbox = DEFAULT_SANDBOX if requested is None else requested
+    if sandbox not in SANDBOX_MODES:
+        raise ConfigurationError(f"{source} must be one of {', '.join(SANDBOX_MODES)}")
+    explicit = requested is not None
+    if args.allow_symlinks:
+        return AccessSettings(sandbox, explicit, True)
+    raw = os.environ.get(ALLOW_SYMLINKS_ENV, "").strip().lower()
+    if raw in _TRUE_VALUES:
+        return AccessSettings(sandbox, explicit, True)
+    if raw in _FALSE_VALUES:
+        return AccessSettings(sandbox, explicit, False)
+    raise ConfigurationError(f"{ALLOW_SYMLINKS_ENV} must be 1/true/yes/on or 0/false/no/off")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -40,6 +91,22 @@ def _parser() -> argparse.ArgumentParser:
         help="local SQLite journal path",
     )
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
+    parser.add_argument(
+        "--sandbox",
+        metavar="MODE",
+        help=(
+            f"Codex sandbox for started or resumed threads: {', '.join(SANDBOX_MODES)}; "
+            f"overrides {SANDBOX_ENV}; default {DEFAULT_SANDBOX}; not accepted by queue"
+        ),
+    )
+    parser.add_argument(
+        "--allow-symlinks",
+        action="store_true",
+        help=(
+            "record symlinks inside the workspace as change evidence (never followed) "
+            f"instead of failing; also {ALLOW_SYMLINKS_ENV}=1"
+        ),
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     doctor = commands.add_parser("doctor", help="check local runtime prerequisites")
@@ -225,7 +292,7 @@ def _event_dict(event: CompletionEvent) -> dict[str, object]:
     }
 
 
-def _doctor() -> dict[str, object]:
+def _doctor(sandbox: SandboxMode, allow_symlinks: bool) -> dict[str, object]:
     python_supported = (3, 11) <= sys.version_info[:2] < (3, 15)
     codex = shutil.which("codex")
     version: str | None = None
@@ -250,6 +317,8 @@ def _doctor() -> dict[str, object]:
         "codex_found": codex is not None,
         "codex_version": version,
         "app_server_transport": "stdio",
+        "sandbox": sandbox,
+        "allow_symlinks": allow_symlinks,
     }
 
 
@@ -271,6 +340,8 @@ def _error_value(exc: BaseException) -> dict[str, object]:
         code = "UNSUPPORTED_CAPABILITY"
     elif isinstance(exc, ContractValidationError):
         code = "invalid_contract"
+    elif isinstance(exc, ConfigurationError):
+        code = "invalid_configuration"
     elif isinstance(exc, JournalError):
         code = exc.__class__.__name__.lower()
     elif isinstance(exc, FileNotFoundError):
@@ -288,10 +359,16 @@ def main(
     args = _parser().parse_args(argv)
     as_json = bool(args.json or getattr(args, "command_json", False))
     try:
+        settings = _access_settings(args)
         if args.command == "doctor":
-            value = _doctor()
+            value = _doctor(settings.sandbox, settings.allow_symlinks)
             _emit(value, as_json=as_json)
             return 0 if value["ok"] else 2
+        if args.command == "queue" and settings.sandbox_explicit:
+            raise ConfigurationError(
+                "queue inherits the active owner thread's sandbox; "
+                f"unset --sandbox and {SANDBOX_ENV} for queue"
+            )
         if args.command == "queue" and not args.shared_app_server:
             raise UnsupportedCapability(
                 "queue CLI requires --shared-app-server; a fresh App Server "
@@ -384,7 +461,10 @@ def main(
             else:
                 contract = _read_contract(args.contract)
                 roots = tuple(args.allow_root) or (Path.cwd(),)
-                policy = WorkspacePolicy(tuple(Path(root).resolve() for root in roots))
+                policy = WorkspacePolicy(
+                    tuple(Path(root).resolve() for root in roots),
+                    record_symlinks=settings.allow_symlinks,
+                )
                 if args.command == "queue":
                     version = args.experimental_api_version
                     if version != EXPERIMENTAL_QUEUE_API_VERSION:
@@ -403,7 +483,7 @@ def main(
                         factory = adapter_factory
                 else:
                     factory = adapter_factory or (lambda: AppServerAdapter())
-                operator = Operator(journal, factory, policy)
+                operator = Operator(journal, factory, policy, sandbox=settings.sandbox)
                 if args.command == "queue":
                     outcome = asyncio.run(
                         QueueContinuationOperator(
@@ -415,7 +495,9 @@ def main(
                     )
                 elif args.command == "continue":
                     outcome = asyncio.run(
-                        ContinuationOperator(journal, factory, policy).continue_idle(
+                        ContinuationOperator(
+                            journal, factory, policy, sandbox=settings.sandbox
+                        ).continue_idle(
                             contract, thread_id=args.thread_id
                         )
                     )

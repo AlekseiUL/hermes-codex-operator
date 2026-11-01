@@ -12,6 +12,19 @@ All notable changes to this project will be documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Operator-level Codex sandbox selection: global `--sandbox` option and
+  `HERMES_CODEX_SANDBOX` environment switch. The default stays
+  `workspace-write`; WorkContracts cannot select a sandbox.
+- Opt-in `--allow-symlinks` / `HERMES_CODEX_ALLOW_SYMLINKS=1` to record
+  workspace symlinks as change evidence (link target, never followed) instead
+  of failing. A symlinked workspace root is still rejected.
+- `doctor` reports the effective `sandbox` and `allow_symlinks` values.
+- Invalid access configuration (flag or environment) fails with
+  `invalid_configuration` before dispatch; `queue` rejects any sandbox
+  setting because it inherits the active owner thread's sandbox.
+
 ### Documentation
 
 - Reconcile README, compatibility, reviews, roadmap, RFC status, implementation
